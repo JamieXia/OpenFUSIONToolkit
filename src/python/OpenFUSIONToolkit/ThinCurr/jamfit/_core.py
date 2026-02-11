@@ -1,18 +1,24 @@
+#------------------------------------------------------------------------------
+# Flexible Unstructured Simulation Infrastructure with Open Numerics (Open FUSION Toolkit)
+#
+# SPDX-License-Identifier: LGPL-3.0-only
+#------------------------------------------------------------------------------
+'''! Core definitions for Jamfit - filament reconstruction
+@authors Jamie Xia
+@date Feb 2026
+'''
+
+
 ## IMPORTING EXTERNAL LIBRARIES ##
-from tabnanny import verbose
 import time
 import numpy as np
 import sys
 import os
 import matplotlib.pyplot as plt
 import pyvista as pv
-import pandas as pd
 import h5py
-import xml.etree.ElementTree as ET
 import pyvista 
 from collections import OrderedDict
-from . import jam_functions
-from . import filaments
 pyvista.set_jupyter_backend('static') # Comment to enable interactive plots
 
 sys.path.insert(0, '/Applications/OpenFUSIONToolkit/python')
@@ -27,10 +33,11 @@ from OpenFUSIONToolkit.TokaMaker.util import read_mhdin, read_kfile
 from OpenFUSIONToolkit.TokaMaker import TokaMaker
 from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
 
-'''! Core definitions for Jamfit - filament reconstruction
-@authors Jamie Xia
-@date Dec 2025
-'''
+
+
+# ===============================
+# Jamfit Base Class
+# ===============================
 
 class Jamfit(): 
     def __init__(self,xml_file, thincurr_meshfile, tokamaker_meshfile, nthreads = None, oft_env = None):
@@ -80,8 +87,8 @@ class Jamfit():
         self.num_points = num_fil_points
         r0_list = intial_r0*np.ones(self.num_points) # note this is where the current centroid is assumed to be stationary (which is unlikely during a disruption)
         z0_list = intial_z0 * np.ones(self.num_points)
-        plasma_curr = jam_functions.setup_synthetic_current(time_array, totalip, sigma_r, sigma_z, r0_list, z0_list, R, Z)
-        high_res_time, total_current_high_res = jam_functions.interpolate_total_current(plasma_curr, nsteps, verbose = verbose)
+        plasma_curr = setup_synthetic_current(time_array, totalip, sigma_r, sigma_z, r0_list, z0_list, R, Z)
+        high_res_time, total_current_high_res = interpolate_total_current(plasma_curr, nsteps, verbose = verbose)
         plasma_curr = plasma_curr[:, 1:] #removing time column for thincurr run
 
         self.final_coil_currs = np.hstack((coil_curr, plasma_curr)) #getting final coil currents with plasma currents added on for run_td 
@@ -191,108 +198,63 @@ class Jamfit():
             raise ValueError("Reduced model has not been created yet. Please create or intialize a reduced model before running reconstruction.")
         return "working in progress"
 
+# ===============================
+# Jamfit Helper functions
+# ===============================
+# applies a gassuian distribution based on an inputed ip list and spreads it with a sigmas distrubtion and centers it at r0 and z0 
+# returns lisst of coil currents for filaments where the first index of every row is the time 
+def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rmesh, zmesh):
+    coil_curr = [] 
+    for i in range(len(timepoints)): 
+        gaussian_raw = np.exp(-((rmesh - r0[i])**2 / (2 * sigma_r**2) + (zmesh - z0[i])**2 / (2 * sigma_z**2)))
+        gaussian_values = ip_list[i]*(gaussian_raw/np.sum(gaussian_raw))
+        coil_curr.append(gaussian_values) 
+    coil_curr = np.array(coil_curr)             
+    time_column = np.array(timepoints).reshape(-1, 1)
+    coil_curr = np.hstack((time_column, coil_curr))
+    return coil_curr
 
-def solve_filaments_legacy(time, torus, PsiFull, total_current, num_coils, mag_time, ip_time, ip_weight, magnetics_weight, reg_factor_fil = 1.E-8, reg_factor_wall= 1.E-2):
-    Ms = np.append(torus.Ms, np.zeros((torus.Ms.shape[0],1)),axis=1) 
-    new_col = np.ones((torus.Msc.shape[0], 1))*ip_weight
-    new_col[:num_coils] = 0  # set the fcoils and ecoils to zero 
-    Msc = np.append(torus.Msc, new_col, axis=1)
-    combined_matrix = np.vstack((Ms, Msc))
-    combined_matrix = combined_matrix.T
-    num_Ms = torus.Ms.shape[0]
-    num_Msc = torus.Msc.shape[0]
 
-    solutions_for_each_time = []
-    for i in time:
-        B_index = np.argmin(np.abs(mag_time - i))
-        I_index = np.argmin(np.abs(ip_time - i)) 
-        B = PsiFull[:,B_index] * magnetics_weight
-        B = np.append(B, total_current[I_index]*ip_weight)
-        A = combined_matrix 
-        reg_identity_fil = reg_factor_fil*np.eye(A.shape[1])
-        
-        reg_identity_wall = reg_factor_wall*np.eye(A.shape[1])  
-        A = np.vstack([A, reg_identity_wall[:num_Ms, :], reg_identity_fil[num_Ms:num_Ms+num_Msc, :]]) 
-        B = np.concatenate([B, np.zeros(A.shape[1])])
-        AtA = A.T @ A
-        AtB = A.T @ B
-        solution = np.linalg.solve(AtA, AtB)    
-        solutions_for_each_time.append(solution)
-        
-    solutions_for_each_time = np.array(solutions_for_each_time)
-    return solutions_for_each_time
-
-def solve_filaments(time, torus, PsiFull, total_current, error_matrix, num_coils, mag_time, ip_time, reg_factor_fil = 1.E-8, reg_factor_wall= 1.E-2):
-            
-    '''
-    Function solves filament and wall currents over time 
+def interpolate_total_current(coil_currs, nsteps, verbose=False):
+    """
+    Interpolates total current from coil sensor data to a higher-resolution time grid.
     
     Parameters:
-    ----------
-    time : float array
-        time array that corresponds to the time steps of the measurements, should be in the shape [time0, time1, time2, time3...]
+    - coil_currs: np.ndarray, shape (ntimes, nsensors+1)
+        First column is time, remaining columns are sensor currents.
+    - nsteps: int
+        Number of high-resolution steps between the first and last time.
     
-    torus : reduced thincurr object
-        should be a reduced thincurr object 
-        
-    PsiFull: float array
-        magnetic sensor signals where each row is a different magnetic sensor and each column is a measurement in time. 
-        PsiFull = [ [sensor1 time0, time1, time2, time3...], [sensor2 time0, time1, time2, time3]... ] should be in this shape! 
-        The number of columns should be equal to the number of timesteps!
-    
-    total_current: float array
-        total plasma current measurement should just be in the shape [measurement1, measurement2, measurement3] where each column
-        is at a different time step, make sure that the number of columns also matches the number of timesteps. 
-    
-    reg_factor_fil : float
-        regularization strength for the filaments
-        
-    reg_factor_wall : float
-        regularization strength for the wall currents
-        
-    error_matrix: float array
-        gives the sensor error for each point in time for each of the sensors. shape should be [[mag1 error at t0, mag2 error at t0, ...,   current error at t0], [mag1 error at t1, mag2 error at t1, .... ,current error at t1]]. so number of columns matches the number of magnetic sensors + 1 (for the total current), and the number of rows correspond to the number of timesteps 
-    
-    num_coils : int
-        number of coils that are not filaments, i.e they do not contribute to the total plasma current but are within the Msc matrix
-    
-        
     Returns:
-    ----------
-    an array with the wall currents and the filaments currents over the entire time range. 
-    '''
-                
-    # Ms corresponds to the wall mode weighting, Msc corresponds to the coil mode weighting 
-    Ms = np.append(torus.Ms, np.zeros((torus.Ms.shape[0],1)),axis=1) #adding an extra row for the current constraint, set to 0
-    new_col = np.ones((torus.Msc.shape[0], 1)) #adding an extra row for the current constraint 
-    new_col[:num_coils] = 0  # set the nonfilament coils rows to zero (like vcoils, oh coils, f coils etc.) 
-    Msc = np.append(torus.Msc, new_col, axis=1) #appending the extra row for the current constraint, i.e filament currents add to total plasma current
-    combined_matrix = np.vstack((Ms, Msc))
-    combined_matrix = combined_matrix.T #stacking both matrices, wall and coils, and tranposing for shape matching 
-    num_Ms = torus.Ms.shape[0]
-    num_Msc = torus.Msc.shape[0]
+    - high_res_time: np.ndarray
+    - total_current_high_res: np.ndarray
+    """
+    # Separate time and sensor currents
+    times = coil_currs[:, 0]
+    sensor_currents = coil_currs[:, 1:]
     
-    solutions_for_each_time = []
+    # Generate high-resolution time grid
+    high_res_time = np.linspace(times[0], times[-1], nsteps + 1)
     
-    for t in range(len(time)): #iterating through by every time step
-        B_index = np.argmin(np.abs(mag_time - time[t]))
-        I_index = np.argmin(np.abs(ip_time - time[t])) 
-        error_timestep = np.tile(error_matrix[t,:], (np.shape(combined_matrix)[1], 1)) # getting the errors of each 
-        # sensor at that specific time step and tiling it such that it matches the shape of combined_matrix (before transpose) 
-        A = combined_matrix*error_timestep.T #now multiplying the error to the combined_matrix (transposed for shape matching) 
-        
-        B = np.append(PsiFull[:,B_index], total_current[I_index]) #stacking the sensor signals and the total current at time t
-        B = B*error_matrix[t,:].T #multiplying by the error matrix as well. 
-        
-        reg_identity_fil = reg_factor_fil*np.eye(A.shape[1]) # incorporating the regularization for filaments and wall
-        reg_identity_wall = reg_factor_wall*np.eye(A.shape[1])
-        A = np.vstack([A, reg_identity_wall[:num_Ms, :], reg_identity_fil[num_Ms:num_Ms+num_Msc, :]]) 
-        B = np.concatenate([B, np.zeros(A.shape[1])])
-        AtA = A.T @ A
-        AtB = A.T @ B
-        solution = np.linalg.solve(AtA, AtB)    # least squares solver
-        solutions_for_each_time.append(solution)
-        
-    solutions_for_each_time = np.array(solutions_for_each_time)       
-    return solutions_for_each_time #return wall and filament solutions 
-
+    # Interpolate each sensor's current to high-res time using numpy.interp
+    interpolated_currents = np.array([
+        np.interp(high_res_time, times, sensor)
+        for sensor in sensor_currents.T
+    ]).T  # shape: (nsteps+1, nsensors)
+    
+    # Sum currents across sensors at each high-res time step
+    total_current_high_res = np.sum(interpolated_currents, axis=1)
+    
+    # Plotting
+    if verbose:
+        plt.figure(figsize=(8, 5))
+        plt.scatter(times, np.sum(sensor_currents, axis=1), color='red', label='Original Data')
+        plt.plot(high_res_time, total_current_high_res, color='blue', label='Interpolated Total Current')
+        plt.xlabel('Time [s]')
+        plt.ylabel('Total Current [A]')
+        plt.title('Total Current vs Time with Higher Resolution')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+    
+    return high_res_time, total_current_high_res
