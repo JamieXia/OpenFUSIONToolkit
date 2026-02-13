@@ -27,11 +27,7 @@ from OpenFUSIONToolkit import OFT_env
 from OpenFUSIONToolkit.ThinCurr.sensor import Mirnov, save_sensors, circular_flux_loop
 from OpenFUSIONToolkit.util import mu0
 from OpenFUSIONToolkit.io import histfile
-from OpenFUSIONToolkit.TokaMaker import TokaMaker
-from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
-from OpenFUSIONToolkit.TokaMaker.util import read_mhdin, read_kfile
-from OpenFUSIONToolkit.TokaMaker import TokaMaker
-from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+
 
 
 
@@ -40,7 +36,7 @@ from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
 # ===============================
 
 class Jamfit(): 
-    def __init__(self,xml_file, thincurr_meshfile, tokamaker_meshfile, nthreads = None, oft_env = None):
+    def __init__(self,xml_file, thincurr_meshfile, nthreads = None, oft_env = None):
         if oft_env is not None:
             self.myOFT = oft_env
         else:
@@ -50,58 +46,42 @@ class Jamfit():
         
         self.xml_file = xml_file
         self.thincurr_meshfile = thincurr_meshfile
-        self.tokamaker_meshfile = tokamaker_meshfile
         self.reduced_created_flag = False 
 
     def set_xml(self, xml_file):
         self.xml_file = xml_file
     
-    def set_sensors_manually(self, sensor_array, floops_path = 'floops.loc'): 
-        self.sensors = sensor_array
-        save_sensors(self.sensors, filename=floops_path)
+    def set_sensors(self, sensor_array, floops_path = 'floops.loc'): 
+        save_sensors(sensor_array, filename=floops_path)
         return floops_path
 
     def setup_jamfit(self, floops_path): 
         self.torus = ThinCurr(self.myOFT)
         self.torus.setup_model(mesh_file = self.thincurr_meshfile, xml_filename = self.xml_file)
         self.torus.setup_io()
-        if self.sensors is not None:
-            self.Msensor, self.Msc, self.sensor_obj = self.torus.compute_Msensor(floops_path)
-            self.torus.compute_Mcoil(cache_file = 'full_HOLDR_M.save')
-            self.torus.compute_Lmat(use_hodlr=True, cache_file = 'full_HOLDR_L.save') # Compute the inductance matrix, hodlr is recommended for speed and memory
-            self.torus.compute_Rmat() 
-        else:
-            print("No sensors have been set up yet. Mutual inductance matricies have not been computed.")
+        self.Msensor, self.Msc, self.sensor_obj = self.torus.compute_Msensor(floops_path)
+        self.torus.compute_Mcoil(cache_file = 'full_HOLDR_M.save') 
         print('Jamfit setup complete.')
 
-    def load_synthetic_data(self, time_array, num_fil_points, coil_current_array, nsteps, intial_r0, intial_z0, totalip, sigma_r, sigma_z, R, Z, num_eigs = 50, verbose = False):
-        #assuming that time_array is in milliseconds
-        # setting up time parameters
-        timeoffset = time_array[0]/1E3 # this needs to be in seconds 
-        self.dt = ((time_array[-1]/1000) - timeoffset)/nsteps # change in time for run_td
-        self.nsteps = nsteps
-        # setting up coils 
-        coil_time = ((time_array/1E3) - timeoffset).reshape(-1, 1)  #time array with time offset to start at 0
-        coil_curr = np.hstack([coil_time, coil_current_array])
-        #setting up filaments/plasma current
-        self.num_points = num_fil_points
-        r0_list = intial_r0*np.ones(self.num_points) # note this is where the current centroid is assumed to be stationary (which is unlikely during a disruption)
-        z0_list = intial_z0 * np.ones(self.num_points)
-        plasma_curr = setup_synthetic_current(time_array, totalip, sigma_r, sigma_z, r0_list, z0_list, R, Z)
-        high_res_time, total_current_high_res = interpolate_total_current(plasma_curr, nsteps, verbose = verbose)
-        plasma_curr = plasma_curr[:, 1:] #removing time column for thincurr run
+   
+    def setup_fil_timeseries(self, time_array, totalip, coil_currs,  r_list, z_list, sigma_r, sigma_z, rgrid, zgrid): 
+        coil_curr_wtime = np.hstack([time_array, coil_currs]) 
+        plasma_curr_wtime = setup_synthetic_current(time_array, totalip, sigma_r, sigma_z, r_list, z_list, rgrid, zgrid)
+        plasma_curr = plasma_curr_wtime[:, 1:]
+        final_coil_currs = np.hstack((coil_curr_wtime, plasma_curr)) #getting final coil currents with plasma currents added on for run_td 
+        return final_coil_currs
 
-        self.final_coil_currs = np.hstack((coil_curr, plasma_curr)) #getting final coil currents with plasma currents added on for run_td 
-        self.torus.run_td(self.dt,self.nsteps,status_freq=10,coil_currs=self.final_coil_currs,sensor_obj=self.sensor_obj) 
 
-        self.eig_vals, self.eig_vecs = self.torus.get_eigs(num_eigs,False)
+    def gen_synthetic_data(self, coil_currs, dt, nsteps):
+        self.torus.run_td(dt, nsteps, compute_B=True, coil_currs=coil_currs,sensor_obj=self.sensor_obj) 
         self.torus.plot_td(self.nsteps,compute_B=True,sensor_obj=self.sensor_obj)
         _, self.Bc = self.torus.compute_Bmat(cache_file='HODLR_B.save') #mb abstract to user input defined named file? 
         hist_file = histfile('floops.hist') # hist file is storing the sensor signals and their response in time
-        print(f'Synthetic time dependent run complete and {num_eigs} eigenvalues computed.')
+        print(f'Synthetic time dependent run complete.')
 
-
-    def create_reduced(self, num_modes, reduced_filename, verbose = False):
+    # generalize this script more, call more descriptive, create_reduced_from_dom_modes> more specfic 
+    def create_from_runTD_top_modes(self, num_modes, reduced_filename, num_eigs = 50, verbose = False):
+        self.eig_vals, self.eig_vecs = self.torus.get_eigs(num_eigs,False)
         torus_first_reduced = self.torus.build_reduced_model(self.eig_vecs, filename = 'first_reduced_model_temp.h5', sensor_obj=self.sensor_obj) ##user input 
         sensors_measurement, currents = torus_first_reduced.run_td(self.dt,self.nsteps,self.final_coil_currs, status_freq=10)
         temp_curr = currents['curr']
@@ -188,6 +168,8 @@ class Jamfit():
         p.add_mesh(arrows, cmap="turbo", scalar_bar_args={'title': "|J|", "vertical": True, "position_y":0.25, "position_x": 0.0})
         p.show()
 
+        
+
     def intialized_reduced_model(self, reduced_filename): 
         self.torus_reduced = ThinCurr_reduced(reduced_filename) 
         self.reduced_created_flag = True
@@ -197,6 +179,10 @@ class Jamfit():
         if not self.reduced_created_flag:
             raise ValueError("Reduced model has not been created yet. Please create or intialize a reduced model before running reconstruction.")
         return "working in progress"
+
+    # TODO: implement the different reconstruction algorithmns within the class, SVD, LS laplace -- see sparc model 
+
+
 
 # ===============================
 # Jamfit Helper functions
