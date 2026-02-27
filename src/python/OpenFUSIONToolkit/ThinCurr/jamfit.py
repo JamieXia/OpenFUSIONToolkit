@@ -18,7 +18,7 @@ import pyvista as pv
 import h5py
 from collections import OrderedDict
 
-pyvista.set_jupyter_backend('static')  # Comment to enable interactive plots
+pv.set_jupyter_backend('static')  # Comment to enable interactive plots
 
 sys.path.insert(0, '/Applications/OpenFUSIONToolkit/python')
 from OpenFUSIONToolkit.ThinCurr import ThinCurr, ThinCurr_reduced
@@ -121,11 +121,11 @@ class Jamfit():
         self.torus.compute_Rmat(copy_out=True)
         self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
-        _, Bc = self.torus.compute_Bmat(cache_file='HODLR_B.save')
-        hist_file = histfile('floops.hist')
-        print('Synthetic time dependent run complete.')
+        hist_file = histfile('floops.hist') ## have it return the hist_file object. 
+        # mb extract from histfile, sensor data etc. 
+        return hist_file, 
 
-    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, nsteps, dt, num_eigs=50, verbose=False):
+    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False):
         '''! Build a reduced model using the dominant eigenmodes from a full run.
 
         Computes eigenvalues, runs a preliminary reduced model to identify the
@@ -141,7 +141,7 @@ class Jamfit():
         @param verbose bool, if True, plots mode amplitudes and prints mode info (default: False)
         @result ThinCurr_reduced, the constructed reduced model object
         '''
-        self.eig_vals, self.eig_vecs = self.torus.get_eigs(num_eigs, False)
+        self.eig_vals, self.eig_vecs = self.torus.get_eigs(initial_num_eigs, False)
         torus_first_reduced = self.torus.build_reduced_model(
             self.eig_vecs, filename='first_reduced_model_temp.h5', sensor_obj=self.sensor_obj
         )
@@ -168,14 +168,27 @@ class Jamfit():
                 if verbose:
                     ax.semilogy(currents['time'], abs(currents['curr'][:, i]), color='gray', alpha=0.3)
 
+        self.reduced_torus = self.create_reduced_model(self.eig_vecs[eig_inds, :], reduced_filename, compute_B=False)
+        self.reduced_created_flag = True
+        return self.reduced_torus, sensors_measurement, currents
+    
+    def create_reduced_model(self, eig_vecs, reduced_filename, compute_B=False):
+        '''! Build a reduced model using specified eigenvectors.
+
+        @param eig_vecs np.ndarray, array of eigenvectors to use for the reduced model
+        @param reduced_filename str, output filename for the reduced model (HDF5)
+        @param compute_B bool, if True, computes the B matrix for the reduced model (default: False)
+        @result ThinCurr_reduced, the constructed reduced model object
+        '''
         self.reduced_torus = self.torus.build_reduced_model(
-            self.eig_vecs[eig_inds, :], filename=reduced_filename, compute_B=False, sensor_obj=self.sensor_obj
+            eig_vecs, filename=reduced_filename, compute_B=compute_B, sensor_obj=self.sensor_obj
         )
-        print(f"Reduced model created with {num_modes} modes")
+        print(f"Reduced model created with {eig_vecs.shape[0]} modes")
         self.reduced_created_flag = True
         return self.reduced_torus
+    
 
-    def add_freq_eigenvalues(self, specific_fil_array):
+    def add_freq_eigenvalues(self, specific_fil_array): 
         '''! Augment the eigenvector basis with frequency-response vectors for specific filaments.
 
         For each filament index provided, computes the steady-state frequency
@@ -199,7 +212,7 @@ class Jamfit():
             clear_output(wait=True)
 
         self.eig_vecs = eig_vecs_wfreq
-        return "computed frequency response eigenvalues"
+        return eig_vecs_wfreq
 
     def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
         '''! Visualize sensor positions on the ThinCurr mesh using PyVista.
@@ -270,7 +283,7 @@ class Jamfit():
         self.reduced_created_flag = True
         return "Reduced model initialized from file."
 
-    def run_reconstruction_lcfs(self, Psi, totalip, num_coils, ip_weight, magnetics_weight, reg_factor_fil, reg_factor_wall):
+    def run_reconstruction_lstsq(self, Psi, totalip, num_coils, ip_weight, magnetics_weight, reg_factor_fil, reg_factor_wall):
         '''! Run the filament current reconstruction.
         @param Psi np.ndarray, sensor flux measurements
         @param totalip np.ndarray, total plasma current measurement
