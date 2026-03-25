@@ -40,11 +40,10 @@ class Jamfit():
     ThinCurr framework.
     '''
 
-    def __init__(self, xml_file, thincurr_meshfile, save_directory = None, nthreads=None, oft_env=None):
+    def __init__(self, xml_file, thincurr_meshfile, nthreads=None, oft_env=None):
         '''! Initialize the Jamfit object.
         @param xml_file str, path to the XML configuration file
         @param thincurr_meshfile str, path to the ThinCurr mesh file
-        @param save_directory str, path to the directory where results will be saved
         @param nthreads int, number of threads to use (required if oft_env is None)
         @param oft_env OFT_env, an existing OFT environment instance (optional)
         '''
@@ -58,8 +57,7 @@ class Jamfit():
         self.xml_file = xml_file
         self.thincurr_meshfile = thincurr_meshfile
         self.reduced_created_flag = False
-        self.save_directory = save_directory
-    
+
     def set_xml(self, xml_file):
         '''! Update the XML configuration file path.
         @param xml_file str, path to the new XML configuration file
@@ -75,19 +73,12 @@ class Jamfit():
         save_sensors(sensor_array, filename=floops_path)
         return floops_path
     
-    def set_savepath(self, save_directory):
-        '''! Update the directory where results will be saved.
-        @param save_directory str, path to the new save directory
-        '''
-        self.save_directory = save_directory
-    
+    # @TODO: fix to be plotfile path 
     def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False):
         '''! Set up the ThinCurr model, I/O, and sensor/coil mutual inductance matrices.
         @param floops_path str, path to the sensor locations file
         '''
         self.torus = ThinCurr(self.myOFT)
-        if self.save_directory is not None:
-            self.torus.setup_io(basepath=self.save_directory)
         self.torus.setup_model(mesh_file=self.thincurr_meshfile, xml_filename=self.xml_file)
         if plot_files is not None:
             self.torus.setup_io(basepath=plot_files, legacy_hdf5=use_legacy_io)
