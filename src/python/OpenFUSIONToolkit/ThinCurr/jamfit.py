@@ -40,10 +40,11 @@ class Jamfit():
     ThinCurr framework.
     '''
 
-    def __init__(self, xml_file, thincurr_meshfile, nthreads=None, oft_env=None):
+    def __init__(self, xml_file, thincurr_meshfile, save_directory = None, nthreads=None, oft_env=None):
         '''! Initialize the Jamfit object.
         @param xml_file str, path to the XML configuration file
         @param thincurr_meshfile str, path to the ThinCurr mesh file
+        @param save_directory str, path to the directory where results will be saved
         @param nthreads int, number of threads to use (required if oft_env is None)
         @param oft_env OFT_env, an existing OFT environment instance (optional)
         '''
@@ -57,7 +58,8 @@ class Jamfit():
         self.xml_file = xml_file
         self.thincurr_meshfile = thincurr_meshfile
         self.reduced_created_flag = False
-
+        self.save_directory = save_directory
+    
     def set_xml(self, xml_file):
         '''! Update the XML configuration file path.
         @param xml_file str, path to the new XML configuration file
@@ -72,14 +74,25 @@ class Jamfit():
         '''
         save_sensors(sensor_array, filename=floops_path)
         return floops_path
-
-    def setup_jamfit(self, floops_path):
+    
+    def set_savepath(self, save_directory):
+        '''! Update the directory where results will be saved.
+        @param save_directory str, path to the new save directory
+        '''
+        self.save_directory = save_directory
+    
+    def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False):
         '''! Set up the ThinCurr model, I/O, and sensor/coil mutual inductance matrices.
         @param floops_path str, path to the sensor locations file
         '''
         self.torus = ThinCurr(self.myOFT)
+        if self.save_directory is not None:
+            self.torus.setup_io(basepath=self.save_directory)
         self.torus.setup_model(mesh_file=self.thincurr_meshfile, xml_filename=self.xml_file)
-        self.torus.setup_io()
+        if plot_files is not None:
+            self.torus.setup_io(basepath=plot_files, legacy_hdf5=use_legacy_io)
+        else:
+            self.torus.setup_io() 
         self.Msensor, self.Msc, self.sensor_obj = self.torus.compute_Msensor(floops_path)
         self.torus.compute_Mcoil(cache_file='full_HOLDR_M.save')
         print('Jamfit setup complete.')
@@ -107,7 +120,7 @@ class Jamfit():
         final_coil_currs = np.hstack((coil_curr_wtime, plasma_curr))
         return final_coil_currs
 
-    def gen_synthetic_data(self, coil_currs, dt, nsteps):
+    def gen_synthetic_data(self, coil_currs, dt, nsteps, verbose = False):
         '''! Run a synthetic time-dependent simulation and compute sensor signals.
 
         Computes the inductance and resistance matrices, runs the time-dependent
@@ -122,8 +135,9 @@ class Jamfit():
         self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
         hist_file = histfile('floops.hist') ## have it return the hist_file object. 
-        # mb extract from histfile, sensor data etc. 
-        return hist_file, 
+        if verbose: 
+            self.torus.build_XDMF()
+        return hist_file 
 
     def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False):
         '''! Build a reduced model using the dominant eigenmodes from a full run.
@@ -148,7 +162,9 @@ class Jamfit():
         sensors_measurement, currents = torus_first_reduced.run_td(dt, nsteps, coil_currs, status_freq=10)
 
         temp_curr = currents['curr']
-        max_weights = [abs(temp_curr[:, i]).max() for i in range(temp_curr.shape[1])]
+        temp_curr = temp_curr[:, 0:initial_num_eigs]  # Only consider the modes we computed
+        max_weights = [abs(temp_curr[:, i]).sum() for i in range(temp_curr.shape[1])] # total sum over time 
+
         top_modenum_indices = sorted(range(len(max_weights)), key=lambda i: max_weights[i], reverse=True)[:num_modes]
 
         eig_inds = []
@@ -167,7 +183,10 @@ class Jamfit():
             else:
                 if verbose:
                     ax.semilogy(currents['time'], abs(currents['curr'][:, i]), color='gray', alpha=0.3)
-
+        print("eig_inds:", eig_inds)
+        print("eig_vecs shape:", self.eig_vecs.shape)
+        print("eig_vecs[eig_inds] shape:", self.eig_vecs[eig_inds, :].shape)
+        print("first row of selected eig_vecs:", self.eig_vecs[eig_inds[0], :5])  # first 5 elements
         self.reduced_torus = self.create_reduced_model(self.eig_vecs[eig_inds, :], reduced_filename, compute_B=False)
         self.reduced_created_flag = True
         return self.reduced_torus, sensors_measurement, currents
@@ -213,6 +232,8 @@ class Jamfit():
 
         self.eig_vecs = eig_vecs_wfreq
         return eig_vecs_wfreq
+
+    ## FIX THIS ## 
 
     def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
         '''! Visualize sensor positions on the ThinCurr mesh using PyVista.
