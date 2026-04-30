@@ -5,27 +5,21 @@
 #------------------------------------------------------------------------------
 '''! Core definitions for Jamfit - filament reconstruction
 @authors Jamie Xia
-@date Feb 2026
+@date April 2026
 '''
 
 ## IMPORTING EXTERNAL LIBRARIES ##
-import time
 import numpy as np
-import sys
-import os
 import matplotlib.pyplot as plt
 import pyvista as pv
-import h5py
-from collections import OrderedDict
 
 pv.set_jupyter_backend('static')  # Comment to enable interactive plots
 
-sys.path.insert(0, '/Applications/OpenFUSIONToolkit/python')
-from OpenFUSIONToolkit.ThinCurr import ThinCurr, ThinCurr_reduced
-from OpenFUSIONToolkit import OFT_env
-from OpenFUSIONToolkit.ThinCurr.sensor import Mirnov, save_sensors, circular_flux_loop
-from OpenFUSIONToolkit.util import mu0
-from OpenFUSIONToolkit.io import histfile
+from ._core import ThinCurr, ThinCurr_reduced
+from .._core import OFT_env
+from .sensor import Mirnov, save_sensors, circular_flux_loop
+from ..util import mu0
+from ..io import histfile
 
 
 # ===============================
@@ -34,7 +28,6 @@ from OpenFUSIONToolkit.io import histfile
 
 class Jamfit():
     '''! Main class for Jamfit filament reconstruction.
-
     Manages setup, synthetic data generation, reduced model creation,
     and eventual reconstruction of plasma filament currents using the
     ThinCurr framework.
@@ -73,8 +66,7 @@ class Jamfit():
         save_sensors(sensor_array, filename=floops_path)
         return floops_path
     
-    # @TODO: fix to be plotfile path 
-    def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False):
+    def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False, hodlr_path = 'full_HOLDR_M.save'):
         '''! Set up the ThinCurr model, I/O, and sensor/coil mutual inductance matrices.
         @param floops_path str, path to the sensor locations file
         '''
@@ -85,12 +77,13 @@ class Jamfit():
         else:
             self.torus.setup_io() 
         self.Msensor, self.Msc, self.sensor_obj = self.torus.compute_Msensor(floops_path)
-        self.torus.compute_Mcoil(cache_file='full_HOLDR_M.save')
+        self.torus.compute_Mcoil(cache_file=hodlr_path)
+        self.torus.compute_Lmat(use_hodlr=True, cache_file=hodlr_path)
+        self.torus.compute_Rmat(copy_out=True)
         print('Jamfit setup complete.')
 
     def setup_fil_timeseries(self, time_array, totalip, coil_currs, r_list, z_list, sigma_r, sigma_z, rgrid, zgrid):
         '''! Build a combined coil + plasma current array for a time-dependent run.
-
         Generates a Gaussian plasma current distribution at each time step and
         appends it to the coil currents for use with run_td.
 
@@ -111,9 +104,8 @@ class Jamfit():
         final_coil_currs = np.hstack((coil_curr_wtime, plasma_curr))
         return final_coil_currs
 
-    def gen_synthetic_data(self, coil_currs, dt, nsteps, verbose = False):
+    def gen_synthetic_data(self, coil_currs, dt, nsteps, verbose = False, hodlr_path = 'full_HOLDR_L.save',s_freq = 10, p_freq=10):
         '''! Run a synthetic time-dependent simulation and compute sensor signals.
-
         Computes the inductance and resistance matrices, runs the time-dependent
         simulation, plots results, and saves the B matrix and sensor history.
 
@@ -121,16 +113,16 @@ class Jamfit():
         @param dt float, time step size in seconds
         @param nsteps int, number of time steps
         '''
-        self.torus.compute_Lmat(use_hodlr=True, cache_file='full_HOLDR_L.save')
-        self.torus.compute_Rmat(copy_out=True)
-        self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj)
+        self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj, status_freq= s_freq, plot_freq=p_freq)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
         hist_file = histfile('floops.hist') ## have it return the hist_file object. 
         if verbose: 
-            self.torus.build_XDMF()
-        return hist_file 
+            plot_data = self.torus.build_XDMF()
+            return hist_file, plot_data
+        else: 
+            return hist_file 
 
-    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False):
+    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False, s_freq = 10, p_freq = 10 ):
         '''! Build a reduced model using the dominant eigenmodes from a full run.
 
         Computes eigenvalues, runs a preliminary reduced model to identify the
@@ -150,7 +142,7 @@ class Jamfit():
         torus_first_reduced = self.torus.build_reduced_model(
             self.eig_vecs, filename='first_reduced_model_temp.h5', sensor_obj=self.sensor_obj
         )
-        sensors_measurement, currents = torus_first_reduced.run_td(dt, nsteps, coil_currs, status_freq=10)
+        sensors_measurement, currents = torus_first_reduced.run_td(dt, nsteps, coil_currs, status_freq=s_freq, plot_freq=p_freq)
 
         temp_curr = currents['curr']
         temp_curr = temp_curr[:, 0:initial_num_eigs]  # Only consider the modes we computed
@@ -163,6 +155,8 @@ class Jamfit():
 
         if verbose:
             fig, ax = plt.subplots(1, 1)
+           # self.torus.build_XDMF()
+
 
         for i in range(temp_curr.shape[1]):
             if i in top_modenum_indices:
@@ -180,7 +174,11 @@ class Jamfit():
         print("first row of selected eig_vecs:", self.eig_vecs[eig_inds[0], :5])  # first 5 elements
         self.reduced_torus = self.create_reduced_model(self.eig_vecs[eig_inds, :], reduced_filename, compute_B=False)
         self.reduced_created_flag = True
-        return self.reduced_torus, sensors_measurement, currents
+        if verbose:
+             return self.reduced_torus, sensors_measurement, currents, self.eig_vecs[eig_inds, :], eig_inds, weight_amplitude
+        else:
+            return self.reduced_torus, sensors_measurement, currents
+    
     
     def create_reduced_model(self, eig_vecs, reduced_filename, compute_B=False):
         '''! Build a reduced model using specified eigenvectors.
