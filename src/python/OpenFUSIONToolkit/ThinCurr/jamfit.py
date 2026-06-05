@@ -5,7 +5,7 @@
 #------------------------------------------------------------------------------
 '''! Core definitions for Jamfit - filament reconstruction
 @authors Jamie Xia
-@date April 2026
+@date June 2026
 '''
 
 ## IMPORTING EXTERNAL LIBRARIES ##
@@ -13,6 +13,7 @@ import numpy
 import matplotlib.pyplot as plt
 import pyvista as pv
 import math
+from matplotlib.path import Path
 
 pv.set_jupyter_backend('static')  # Comment to enable interactive plots
 
@@ -20,7 +21,7 @@ from ._core import ThinCurr, ThinCurr_reduced
 from .._core import OFT_env
 from .sensor import save_sensors
 from ..io import histfile
-
+from ..Tokamaker._core import TokaMaker, load_gs_mesh, find_limiting_point
 
 # ===============================
 # Jamfit Base Class
@@ -238,7 +239,7 @@ class Jamfit():
         self.reduced_created_flag = True
         return "Reduced model initialized from file."
 
-    def run_reconstruction_lstsq(self, Psi_at_time, ip_at_time, num_non_fil_coils, coil_curr_at_time, ip_weight, sigma, reg_factor_fil, reg_factor_wall):
+    def run_reconstruction_lstsq(self, Psi_at_time, ip_at_time, num_non_fil_coils, coil_curr_at_time, ip_weight, sigma, reg_factor_fil, reg_factor_wall, num_sensors = None):
         '''! Run the filament current reconstruction with the lstsq method.
         @param Psi_at_time numpy.ndarray, sensor flux measurements at time
         @param ip_at_time float, total plasma current measurement at time
@@ -251,10 +252,11 @@ class Jamfit():
         '''
         if not self.reduced_created_flag:
             raise ValueError("Reduced model has not been created yet. Please create or initialize a reduced model before running reconstruction.")
-        
+        if num_sensors is None: 
+            num_sensors = self.torus_reduced.Ms.shape[1] 
         # intializing the Ms and Msc matrices with the appropriate weighting and scaling based off sigma
-        Ms_weighted = self.torus_reduced.Ms/sigma[:]
-        Msc_weighted = self.torus_reduced.Msc/sigma[:]
+        Ms_weighted = self.torus_reduced.Ms[:,:num_sensors]/sigma[:]
+        Msc_weighted = self.torus_reduced.Msc[:, :num_sensors]/sigma[:]
         Msc_weighted_fil = Msc_weighted[num_non_fil_coils:, :]
 
         # This section of code scales the total ip constraint row of the matrix to ensure it has a comparable influence on the 
@@ -271,7 +273,7 @@ class Jamfit():
         # here we prepare the the B vector by subtacting the non plasma filament contribution from the sensor measurements
         # we also scale by sigma here as well (to ensure magnetic sensor signals are normalized to each other - one sensor doesnt dominate)
         # finally we append the ip cosntraint row as well 
-        B_weighted = (Psi_at_time - coil_curr_at_time @ self.torus_reduced.Msc[:num_non_fil_coils, :]) / sigma[:] 
+        B_weighted = (Psi_at_time - coil_curr_at_time @ self.torus_reduced.Msc[:num_non_fil_coils, :num_sensors]) / sigma[:] 
         B_weighted = numpy.append(B_weighted, [ip_at_time * ip_weight * ip_row_scale])
 
         # here we apply tikonov regularization to both the filament and wall component of the lstq 
@@ -420,11 +422,95 @@ class Jamfit():
 
         return curr_expand, wall_expand, Ax, diagnostics
 
-  
+    # ======================================
+    # Post Processesing and Visualization
+    # ======================================
+
+
+    def get_wall_psi_tidx(self, num_sensors, solution_wall_tidx): 
+        wall_psi_probes = self.torus_reduced.Ms[:, num_sensors](2*numpy.pi)
+        wall_psi_tidx = solution_wall_tidx @ wall_psi_probes
+        return wall_psi_tidx 
     
-# ========================================================
-# Jamfit Depreciated Functions to be worked on or removed 
-# ========================================================
+
+    def post_process_tidx(self, filaments_at_time, coil_curr_dict, rmesh, zmesh, meshfile_tokamaker, wall_psi, B0, R0, myOFT, verbose = False):
+        '''! Post-process the results at a given time index to compute plasma parameters and visualize.
+        @param filaments_at_time numpy.ndarray, filament currents at the given time index
+        @param coil_curr_dict dict, dictionary of coil currents at the given time index
+        @param rmesh numpy.ndarray, R coordinates of the filament mesh
+        @param zmesh numpy.ndarray, Z coordinates of the filament mesh
+        @param meshfile_tokamaker str, path to the Tokamaker mesh file for equilibrium reconstruction
+        @param wall_psi numpy.ndarray, precomputed wall contribution to the flux
+        @param B0 float, reference magnetic field strength for equilibrium reconstruction
+        @param R0 float, reference major radius for equilibrium reconstruction
+        @param myOFT OFT_env, the Open FUSION Toolkit environment instance
+        @param verbose bool, if True, plots the equilibrium and LCFS (default: False)'''
+
+        #intialize tokamaker 
+        mygs = TokaMaker(myOFT)
+        mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(meshfile_tokamaker)
+        mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+        mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+        mygs.setup(order=2, F0= B0 * R0)# F0 = B0 * R0 
+        limiter = mygs.lim_contour
+
+        # calculate psi from plasmas
+        fil_points = list(zip(rmesh, zmesh))
+        psi_fil = []
+        for filcount, (r, z) in enumerate(fil_points):
+            mygs.set_coil_currents()
+            if filaments_at_time[filcount] > 0:
+                mygs.set_targets(Ip=filaments_at_time[filcount])
+                mygs.init_psi(r, z, 0.3, 1.0, 0.0) 
+                psi_fil.append(mygs.get_psi(False))
+        psi_fil = numpy.array(psi_fil)
+        psi_total_fil = numpy.sum(psi_fil, axis=0)
+        ip = numpy.sum(filaments_at_time)
+        
+        # Calculate psi from coils 
+        mygs.set_coil_currents(coil_curr_dict)
+        psi_vf = mygs.vac_solve()
+
+        # Summate Psis 
+        total_psi = psi_total_fil + psi_vf + wall_psi
+        mygs.set_psi(total_psi, update_bounds = True)
+
+        # getting relevant values 
+        lcfs_points = mygs.trace_surf(1) # Trace LCFS
+        if lcfs_points is not None:
+            psiatlcfs = mygs.psinorm_to_absolute(1)
+
+        if lcfs_points is None: 
+            lcfs_points = mygs.trace_surf(0.99)
+            psiatlcfs = mygs.psinorm_to_absolute(0.99)
+
+        limiting_pts = [] 
+        q_vals = None
+        q95 = None 
+        internal_inductance = None
+        if lcfs_points is not None:
+            lim_R, lim_Z, _ = find_limiting_point(lcfs_points, limiter)
+            limiting_pts.append((lim_R, lim_Z))
+            _, q_vals, _, _, _, _= mygs.get_q() 
+            internal_inductance = mygs.get_stats(beta_Ip = ip)['l_i']
+            _, q95, _ , _, _, _ = mygs.get_q(psi_norm=0.95)
+        else: 
+            psiatlcfs = None 
+            limiting_pts.append(None)
+
+        if verbose: 
+            fig, ax = plt.subplots(1,1) 
+            mygs.plot_machine(fig,ax, cond_color='blue') 
+            mygs.plot_psi(fig,ax ,plasma_nlevels = 75, normalized=False)
+            plt.gca().set_aspect('equal', adjustable='box')
+            if lcfs_points is not None:
+                ax.plot(lcfs_points[:,0], lcfs_points[:,1], 'r--', label='LCFS')
+    
+        return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance
+
+    # ========================================================
+    # Jamfit Depreciated Functions to be worked on or removed 
+    # ========================================================
 
     def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
         '''! Visualize sensor positions on the ThinCurr mesh using PyVista.
