@@ -11,17 +11,18 @@
 ## IMPORTING EXTERNAL LIBRARIES ##
 import numpy
 import matplotlib.pyplot as plt
-import pyvista as pv
+import pyvista as pv #depreciated 
 import math
 from matplotlib.path import Path
 
-pv.set_jupyter_backend('static')  # Comment to enable interactive plots
+pv.set_jupyter_backend('static')  # Comment to enable interactive plots #depreciated
 
 from ._core import ThinCurr, ThinCurr_reduced
 from .._core import OFT_env
 from .sensor import save_sensors
 from ..io import histfile
-from ..Tokamaker._core import TokaMaker, load_gs_mesh, find_limiting_point
+from ..TokaMaker._core import TokaMaker
+from ..TokaMaker.meshing import load_gs_mesh
 
 # ===============================
 # Jamfit Base Class
@@ -120,7 +121,7 @@ class Jamfit():
         '''
         self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj, status_freq= s_freq, plot_freq=p_freq)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
-        hist_file = histfile('floops.hist') ## have it return the hist_file object. 
+        hist_file = histfile('floops.hist')
         if verbose: 
             plot_data = self.torus.build_XDMF()
             return hist_file, plot_data
@@ -160,8 +161,7 @@ class Jamfit():
 
         if verbose:
             fig, ax = plt.subplots(1, 1)
-           # self.torus.build_XDMF()
-
+            self.torus.build_XDMF()
 
         for i in range(temp_curr.shape[1]):
             if i in top_modenum_indices:
@@ -426,13 +426,11 @@ class Jamfit():
     # Post Processesing and Visualization
     # ======================================
 
-
     def get_wall_psi_tidx(self, num_sensors, solution_wall_tidx): 
         wall_psi_probes = self.torus_reduced.Ms[:, num_sensors](2*numpy.pi)
         wall_psi_tidx = solution_wall_tidx @ wall_psi_probes
         return wall_psi_tidx 
     
-
     def post_process_tidx(self, filaments_at_time, coil_curr_dict, rmesh, zmesh, meshfile_tokamaker, wall_psi, B0, R0, myOFT, verbose = False):
         '''! Post-process the results at a given time index to compute plasma parameters and visualize.
         @param filaments_at_time numpy.ndarray, filament currents at the given time index
@@ -688,3 +686,54 @@ def get_laplace_matrix(rgrid, zgrid, verbose =False):
     ## Getting Laplacian matrix
     lap_mat = D - W
     return lap_mat, N
+
+def find_limiting_point(lcfs_points, limiter, touch_tol=0.005):
+    
+    dists = numpy.min(
+        numpy.linalg.norm(lcfs_points[:, None, :] - limiter[None, :, :], axis=2),
+        axis=1
+    )
+    
+    idx = numpy.argmin(dists)
+    min_dist = dists[idx]
+    
+    if min_dist > touch_tol:
+        return None, None, None
+    
+    return lcfs_points[idx, 0], lcfs_points[idx, 1], min_dist
+
+def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False): 
+    mygs = TokaMaker(myOFT)
+    mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(meshfile_tokamaker)
+    mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
+    mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
+    mygs.setup(order=2, F0= 1 * 1)
+    r_pts_grid = mygs.r[:,0]
+    z_pts_grid = mygs.r[:,1]
+    r_pts_lim = mygs.lim_contour[:,0]
+    z_pts_lim = mygs.lim_contour[:,1]
+    lim_path = Path(numpy.column_stack([r_pts_lim, z_pts_lim]))
+    all_pts = numpy.column_stack([r_pts_grid, z_pts_grid])
+    inside_mask = lim_path.contains_points(all_pts) #boolean grid where 1 means inside limiter and 0 means outside
+    used_pts = numpy.where(inside_mask)[0] #returns indicies of points that are inside limiter
+    inside_lim_pts = numpy.column_stack((mygs.r[used_pts, 0], mygs.r[used_pts, 1])) #grabs pts of the grid that are inside the limiter
+
+    if verbose:
+        fig, ax = plt.subplots()
+        ax.scatter(r_pts_grid, z_pts_grid, c=inside_mask, cmap='RdYlGn', s=10, alpha=0.7)
+        ax.plot(r_pts_lim, z_pts_lim, 'k-', label='Limiter Contour')
+        ax.set_xlabel('R')
+        ax.set_ylabel('Z')
+        ax.set_title('Grid Points Inside Limiter')
+        ax.legend()
+        plt.colorbar(ax.collections[0], ax=ax, label='Inside Limiter')
+        plt.tight_layout()
+        plt.show()
+
+    return inside_lim_pts, inside_mask, mygs.r
+
+
+
+
+
+
