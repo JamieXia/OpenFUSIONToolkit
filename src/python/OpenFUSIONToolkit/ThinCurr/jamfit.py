@@ -41,6 +41,7 @@ class Jamfit():
 
     def __init__(self, xml_file, thincurr_meshfile, nthreads=None, oft_env=None):
         '''! Initialize the Jamfit object.
+
         @param xml_file str, path to the XML configuration file
         @param thincurr_meshfile str, path to the ThinCurr mesh file
         @param nthreads int, number of threads to use (required if oft_env is None)
@@ -59,12 +60,14 @@ class Jamfit():
 
     def set_xml(self, xml_file):
         '''! Update the XML configuration file path.
+
         @param xml_file str, path to the new XML configuration file
         '''
         self.xml_file = xml_file
 
     def set_sensors(self, sensor_array, floops_path='floops.loc'):
         '''! Save a sensor array to file and return the file path.
+
         @param sensor_array list, array of sensor objects (e.g. Mirnov, flux loops)
         @param floops_path str, output file path for sensor locations (default: 'floops.loc')
         @result str, path to the saved sensor file
@@ -74,6 +77,7 @@ class Jamfit():
     
     def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False, hodlr_path = 'full_HOLDR_M.save'):
         '''! Set up the ThinCurr model, I/O, and sensor/coil mutual inductance matrices.
+        
         @param floops_path str, path to the sensor locations file
         '''
         self.torus = ThinCurr(self.myOFT)
@@ -130,7 +134,6 @@ class Jamfit():
 
     def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False, s_freq = 10, p_freq = 10 ):
         '''! Build a reduced model using the dominant eigenmodes from a full run.
-
         Computes eigenvalues, runs a preliminary reduced model to identify the
         most active modes by current amplitude, then builds a final reduced model
         using only those dominant modes.
@@ -187,7 +190,7 @@ class Jamfit():
     
     def create_reduced_model(self, eig_vecs, reduced_filename, compute_B=False):
         '''! Build a reduced model using specified eigenvectors.
-
+        
         @param eig_vecs numpy.ndarray, array of eigenvectors to use for the reduced model
         @param reduced_filename str, output filename for the reduced model (HDF5)
         @param compute_B bool, if True, computes the B matrix for the reduced model (default: False)
@@ -232,6 +235,7 @@ class Jamfit():
 
     def initialize_reduced_model(self, reduced_filename):
         '''! Load a previously saved reduced model from file.
+        
         @param reduced_filename str, path to the HDF5 reduced model file
         @result str, confirmation message on successful load
         '''
@@ -241,6 +245,7 @@ class Jamfit():
 
     def run_reconstruction_lstsq(self, Psi_at_time, ip_at_time, num_non_fil_coils, coil_curr_at_time, ip_weight, sigma, reg_factor_fil, reg_factor_wall, num_sensors = None):
         '''! Run the filament current reconstruction with the lstsq method.
+        
         @param Psi_at_time numpy.ndarray, sensor flux measurements at time
         @param ip_at_time float, total plasma current measurement at time
         @param num_non_fil_coils int, number of non-filament coils in the system
@@ -297,6 +302,7 @@ class Jamfit():
     
     def prepare_tsvd_laplace(self, sigma, num_non_fil_coils, rgrid, zgrid, nModes, verbose = False):
         '''! Prepare matrices and projections for the svd + laplacian reconstruction method.
+        
         @param sigma numpy.ndarray, array of standard deviations for each sensor measurement (for weighting)
         @param num_non_fil_coils int, number of non-filament coils in the system
         @param rgrid numpy.ndarray, R coordinates of the filament grid
@@ -345,6 +351,7 @@ class Jamfit():
     
     def run_reconstruction_tsvd_laplace(self, Psi_at_time, ip_at_time, coil_curr_at_time, Msc_coils, Ms, U_trun, ls_mat, ls_mat_fil, lap_proj, ip_row, N, lam=None, lap_lam=1e-8, reg_wall=1e-5):
         '''! Run the filament current reconstruction with the svd + laplacian method.
+        
         @param Psi_at_time numpy.ndarray, sensor flux measurements at time
         @param ip_at_time numpy.ndarray, plasma current measurements at time
         @param coil_curr_at_time numpy.ndarray, coil currents at time
@@ -431,12 +438,13 @@ class Jamfit():
         wall_psi_tidx = solution_wall_tidx @ wall_psi_probes
         return wall_psi_tidx 
     
-    def post_process_tidx(self, filaments_at_time, coil_curr_dict, rmesh, zmesh, meshfile_tokamaker, wall_psi, B0, R0, myOFT, verbose = False):
+    def post_process_tidx(self, filaments_at_time, coil_curr_dict, rgrid, zgrid, meshfile_tokamaker, wall_psi, B0, R0, myOFT, verbose = False):
         '''! Post-process the results at a given time index to compute plasma parameters and visualize.
+        
         @param filaments_at_time numpy.ndarray, filament currents at the given time index
         @param coil_curr_dict dict, dictionary of coil currents at the given time index
-        @param rmesh numpy.ndarray, R coordinates of the filament mesh
-        @param zmesh numpy.ndarray, Z coordinates of the filament mesh
+        @param rgrid numpy.ndarray, R coordinates of the filament mesh
+        @param zgrid numpy.ndarray, Z coordinates of the filament mesh
         @param meshfile_tokamaker str, path to the Tokamaker mesh file for equilibrium reconstruction
         @param wall_psi numpy.ndarray, precomputed wall contribution to the flux
         @param B0 float, reference magnetic field strength for equilibrium reconstruction
@@ -453,7 +461,7 @@ class Jamfit():
         limiter = mygs.lim_contour
 
         # calculate psi from plasmas
-        fil_points = list(zip(rmesh, zmesh))
+        fil_points = list(zip(rgrid, zgrid))
         psi_fil = []
         for filcount, (r, z) in enumerate(fil_points):
             mygs.set_coil_currents()
@@ -486,12 +494,17 @@ class Jamfit():
         q_vals = None
         q95 = None 
         internal_inductance = None
+        current_cent = calc_current_centroid(rgrid, zgrid, ip)
+        area_cent = None
+        area = None
+     
         if lcfs_points is not None:
             lim_R, lim_Z, _ = find_limiting_point(lcfs_points, limiter)
             limiting_pts.append((lim_R, lim_Z))
             _, q_vals, _, _, _, _= mygs.get_q() 
             internal_inductance = mygs.get_stats(beta_Ip = ip)['l_i']
             _, q95, _ , _, _, _ = mygs.get_q(psi_norm=0.95)
+            area, area_cent = calc_lcfs_geo(lcfs_points) 
         else: 
             psiatlcfs = None 
             limiting_pts.append(None)
@@ -504,8 +517,7 @@ class Jamfit():
             if lcfs_points is not None:
                 ax.plot(lcfs_points[:,0], lcfs_points[:,1], 'r--', label='LCFS')
     
-        return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance
-
+        return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance, current_cent, area_cent, area
     # ========================================================
     # Jamfit Depreciated Functions to be worked on or removed 
     # ========================================================
@@ -568,12 +580,11 @@ class Jamfit():
         })
         p.show()
 
-
 # ===============================
 # Jamfit Helper Functions
 # ===============================
 
-def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rmesh, zmesh):
+def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rgrid, zgrid):
     '''! Generate synthetic filament currents using a Gaussian plasma distribution.
     At each time step, spreads the total plasma current across the filament grid
     using a 2D Gaussian centered at (r0, z0) with widths (sigma_r, sigma_z).
@@ -584,14 +595,14 @@ def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rmesh
     @param sigma_z float, Gaussian width in the Z direction
     @param r0 list or numpy.ndarray, R position of the plasma centroid at each time step
     @param z0 list or numpy.ndarray, Z position of the plasma centroid at each time step
-    @param rmesh numpy.ndarray, R coordinates of the filament mesh
-    @param zmesh numpy.ndarray, Z coordinates of the filament mesh
+    @param rgrid numpy.ndarray, R coordinates of the filament mesh
+    @param zgrid numpy.ndarray, Z coordinates of the filament mesh
     @result numpy.ndarray, shape (ntimes, 1 + nfilaments), time column followed by filament currents
     '''
     coil_curr = []
     for i in range(len(timepoints)):
         gaussian_raw = numpy.exp(
-            -((rmesh - r0[i])**2 / (2 * sigma_r**2) + (zmesh - z0[i])**2 / (2 * sigma_z**2))
+            -((rgrid - r0[i])**2 / (2 * sigma_r**2) + (zgrid - z0[i])**2 / (2 * sigma_z**2))
         )
         gaussian_values = ip_list[i] * (gaussian_raw / numpy.sum(gaussian_raw))
         coil_curr.append(gaussian_values)
@@ -637,10 +648,9 @@ def interpolate_total_current(coil_currs, nsteps, verbose=False):
 
     return high_res_time, total_current_high_res
 
-
-
 def get_laplace_matrix(rgrid, zgrid, verbose =False):
     '''! Construct a Laplacian matrix for the 2D filament grid,
+    
     @param rgrid numpy.ndarray, R coordinates of the filament grid
     @param zgrid numpy.ndarray, Z coordinates of the filament grid
     @return lap_mat numpy.ndarray, the constructed Laplacian matrix for the filament grid
@@ -702,6 +712,83 @@ def find_limiting_point(lcfs_points, limiter, touch_tol=0.005):
     
     return lcfs_points[idx, 0], lcfs_points[idx, 1], min_dist
 
+    
+def calc_lcfs_geo(lcfs_points):
+    """
+    Calculate area and geometric centroid of the LCFS.
+
+    Parameters:
+        lcfs_points: array-like of shape (2, N)
+                     lcfs_points[0] = R coordinates
+                     lcfs_points[1] = Z coordinates
+    Returns:
+        area     (float): Enclosed area in m²
+        R_c      (float): Centroid R coordinate in m
+        Z_c      (float): Centroid Z coordinate in m
+    """
+    if lcfs_points is None:
+        return None, None, None
+
+    R = numpy.array(lcfs_points[:, 0])
+    Z = numpy.array(lcfs_points[:, 1])
+
+    # Ensure contour is closed
+    if not (numpy.isclose(R[0], R[-1]) and numpy.isclose(Z[0], Z[-1])):
+        R = numpy.append(R, R[0])
+        Z = numpy.append(Z, Z[0])
+
+    cross = R[:-1] * Z[1:] - R[1:] * Z[:-1]    # Calculates area using Shoelace method, Shoelace terms
+
+    # Area
+    area = 0.5 * numpy.abs(numpy.sum(cross))
+
+    # Centroid
+    R_c = numpy.abs(numpy.sum((R[:-1] + R[1:]) * cross)) / (6 * area)
+    Z_c = numpy.abs(numpy.sum((Z[:-1] + Z[1:]) * cross)) / (6 * area)
+
+    return area, (R_c, Z_c) 
+
+def calc_current_centroid(R_fil, Z_fil, I):
+    '''! Calculate the current centroid of a filament grid using signed current weights
+        This variant uses signed currents as weights, so opposing currents can partially
+        cancel out the centroid position. Useful for computing the net moment of the
+        current distribution.
+        
+        Calculation: R_c = sum(I_i * R_i) / sum(I_i)
+                    Z_c = sum(I_i * Z_i) / sum(I_i)
+        
+        @param R 1D or 2D array of R (radial) coordinates of filament points `[m]`
+        @param Z 1D or 2D array of Z (vertical) coordinates of filament points `[m]`
+        @param I 1D or 2D array of currents at each filament point `[A]`, must match shape of R and Z
+        @result R coordinate of the current centroid `[m]`
+        @result Z coordinate of the current centroid `[m]`
+        @result Net current (algebraic sum) `[A]`
+    '''
+    R = numpy.asarray(R_fil)  # Ensure inputs are numpy arrays
+    Z = numpy.asarray(Z_fil)
+    I = numpy.asarray(I)
+    
+    # Verify shapes match
+    if not (R.shape == Z.shape == I.shape):
+        raise ValueError(
+            f"R, Z, and I must have the same shape. "
+            f"Got R: {R.shape}, Z: {Z.shape}, I: {I.shape}"
+        )
+    
+    R_flat = R.ravel()
+    Z_flat = Z.ravel()
+    I_flat = I.ravel()
+    
+    I_net = numpy.sum(I_flat)
+    if I_net == 0:
+        raise ValueError("Net current is zero - cannot calculate centroid")
+    
+    R_centroid = numpy.sum(I_flat * R_flat) / I_net
+    Z_centroid = numpy.sum(I_flat * Z_flat) / I_net
+
+    return (R_centroid, Z_centroid)
+
+
 def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False): 
     mygs = TokaMaker(myOFT)
     mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(meshfile_tokamaker)
@@ -731,6 +818,7 @@ def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False):
         plt.show()
 
     return inside_lim_pts, inside_mask, mygs.r
+
 
 
 
