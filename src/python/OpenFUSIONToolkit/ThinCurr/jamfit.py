@@ -3,12 +3,14 @@
 #
 # SPDX-License-Identifier: LGPL-3.0-only
 #------------------------------------------------------------------------------
-'''! Core definitions for Jamfit - filament reconstruction
+'''! Core definitions for JAMfit - filament reconstruction
 @authors Jamie Xia
 @date June 2026
 '''
 
 ## IMPORTING EXTERNAL LIBRARIES ##
+import os
+
 import numpy
 import matplotlib.pyplot as plt
 import pyvista as pv #depreciated 
@@ -25,22 +27,22 @@ from ..TokaMaker._core import TokaMaker
 from ..TokaMaker.meshing import load_gs_mesh
 
 # ===============================
-# Jamfit Base Class
+# JAMfit Base Class
 # ===============================
 
-class Jamfit():
-    '''! Main class for Jamfit filament reconstruction.
+class JAMfit():
+    '''! Main class for JAMfit filament reconstruction.
     Manages setup, synthetic data generation, reduced model creation,
     and eventual reconstruction of plasma filament currents using the
     ThinCurr framework.
     '''
 
     # =================================
-    # Jamfit Creation Relevant Classes
+    # JAMfit Creation Relevant Classes
     # =================================
 
     def __init__(self, xml_file, thincurr_meshfile, nthreads=None, oft_env=None):
-        '''! Initialize the Jamfit object.
+        '''! Initialize the JAMfit object.
 
         @param xml_file str, path to the XML configuration file
         @param thincurr_meshfile str, path to the ThinCurr mesh file
@@ -75,7 +77,7 @@ class Jamfit():
         save_sensors(sensor_array, filename=floops_path)
         return floops_path
     
-    def setup_jamfit(self, floops_path, plot_files = None, use_legacy_io=False, hodlr_path = 'full_HOLDR_M.save'):
+    def setup_JAMfit(self, floops_path, plot_files = None, use_legacy_io=False, hodlr_path = 'full_HOLDR_M.save'):
         '''! Set up the ThinCurr model, I/O, and sensor/coil mutual inductance matrices.
         
         @param floops_path str, path to the sensor locations file
@@ -90,7 +92,7 @@ class Jamfit():
         self.torus.compute_Mcoil(cache_file=hodlr_path)
         self.torus.compute_Lmat(use_hodlr=True, cache_file=hodlr_path)
         self.torus.compute_Rmat(copy_out=True)
-        print('Jamfit setup complete.')
+        print('JAMfit setup complete.')
 
     def setup_fil_timeseries(self, time_array, totalip, coil_currs, r_list, z_list, sigma_r, sigma_z, rgrid, zgrid):
         '''! Build a combined coil + plasma current array for a time-dependent run.
@@ -125,7 +127,7 @@ class Jamfit():
         '''
         self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj, status_freq= s_freq, plot_freq=p_freq)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
-        hist_file = histfile('floops.hist')
+        hist_file = histfile(os.path.join(self.torus._io_basepath, 'floops.hist'))      
         if verbose: 
             plot_data = self.torus.build_XDMF()
             return hist_file, plot_data
@@ -266,9 +268,9 @@ class Jamfit():
 
         # This section of code scales the total ip constraint row of the matrix to ensure it has a comparable influence on the 
         # least squares solution as the magnetic measurements, based on the provided ip_weight and the magnitude of ip_at_time
-        ip_row_scale = 1.0 / abs(ip_at_time)
+        ip_row_norm = abs(ip_at_time)
         ip_col_ms = numpy.zeros((Ms_weighted.shape[0], 1))
-        ip_col_msc = numpy.ones((Msc_weighted_fil.shape[0], 1)) * (ip_weight * ip_row_scale)
+        ip_col_msc = numpy.ones((Msc_weighted_fil.shape[0], 1)) * (ip_weight / ip_row_norm)
 
         # appending the ip constraint as an additional row to the Ms and Msc matrices, with appropriate scaling
         Ms_final = numpy.append(Ms_weighted, ip_col_ms, axis=1)
@@ -279,7 +281,7 @@ class Jamfit():
         # we also scale by sigma here as well (to ensure magnetic sensor signals are normalized to each other - one sensor doesnt dominate)
         # finally we append the ip cosntraint row as well 
         B_weighted = (Psi_at_time - coil_curr_at_time @ self.torus_reduced.Msc[:num_non_fil_coils, :num_sensors]) / sigma[:] 
-        B_weighted = numpy.append(B_weighted, [ip_at_time * ip_weight * ip_row_scale])
+        B_weighted = numpy.append(B_weighted, [ip_at_time * ip_weight/ip_row_norm])  # ip_at_time/ip_row_norm reduces to sign(ip_at_time) — magnitude is encoded in A side column
 
         # here we apply tikonov regularization to both the filament and wall component of the lstq 
         # note that we must use the unmodified shapes of Ms to construct the identity matrices for regularization
@@ -296,10 +298,12 @@ class Jamfit():
         solution = numpy.linalg.solve(AtA, AtB)
         Ax = numpy.dot(A, solution)
         residual = numpy.sqrt(numpy.sum((B - Ax)**2))
+        solution_wall = solution[:Ms_weighted.shape[0]]
+        solution_fil = solution[Ms_weighted.shape[0]:]
 
-        return solution, residual, Ax, B
-    
-    
+        return solution_fil, solution_wall, residual, Ax, B
+
+
     def prepare_tsvd_laplace(self, sigma, num_non_fil_coils, rgrid, zgrid, nModes, verbose = False):
         '''! Prepare matrices and projections for the svd + laplacian reconstruction method.
         
@@ -310,7 +314,7 @@ class Jamfit():
         @param nModes int, number of SVD modes to truncate to
         @param verbose bool, if True, plots singular values (default: False)
         ''' 
-
+        
         # getting laplacina matrix for smoothing purposes
         lap_mat, N = get_laplace_matrix(rgrid, zgrid, verbose)
         num_Ms = self.torus_reduced.Ms.shape[0]
@@ -428,6 +432,114 @@ class Jamfit():
         }
 
         return curr_expand, wall_expand, Ax, diagnostics
+    
+    def run_reconstruction_laplace(self, Psi_at_time, ip_at_time, coil_curr_at_time, sigma, 
+                                    num_non_fil_coils, num_real_sensors, rgrid, zgrid, 
+                                    lam=None, lap_lam=1e-6, reg_wall=1e-5, verbose=False):
+        '''! Run filament current reconstruction using direct Laplacian regularization.
+        Solves directly in the physical filament space (no SVD projection), applying
+        Laplacian smoothing to filaments and Tikhonov regularization to wall currents.
+
+        @param Psi_at_time numpy.ndarray, sensor flux measurements at time
+        @param ip_at_time float, total plasma current measurement at time
+        @param coil_curr_at_time numpy.ndarray, coil currents at time
+        @param sigma numpy.ndarray, standard deviations for each sensor (for weighting)
+        @param num_non_fil_coils int, number of non-filament coils in the system
+        @param rgrid numpy.ndarray, R coordinates of the filament grid
+        @param zgrid numpy.ndarray, Z coordinates of the filament grid
+        @param lam float, ip constraint weight (auto-calculated if None)
+        @param lap_lam float, Laplacian regularization parameter (default: 1e-6)
+        @param reg_wall float, Tikhonov regularization for wall currents (default: 1e-5)
+        @param verbose bool, if True prints debug info (default: False)
+        @result tuple of (curr_fil, curr_wall, Ax, diagnostics)
+        '''
+
+        # intializing the Ms and Msc matrices with the appropriate weighting and scaling based off sigma
+        Ms_weighted       = self.torus_reduced.Ms[:, :num_real_sensors] / sigma[:]                          # (n_wall, n_sensors)
+        Msc_weighted      = self.torus_reduced.Msc[:, :num_real_sensors] / sigma[:]                         # (n_coils_total, n_sensors)
+        Msc_coils_weighted         = Msc_weighted[:num_non_fil_coils, :num_real_sensors]                       # (n_shaping_coils, n_sensors)
+        Msc_fil_weighted  = Msc_weighted[num_non_fil_coils:, :num_real_sensors]                       # (n_fil, n_sensors)
+        n_fil             = Msc_fil_weighted.shape[0]
+        num_Ms = Ms_weighted.shape[0]
+
+        # taking out coil contributions from the magnetic sensor signals 
+        B_weighted = (Psi_at_time - coil_curr_at_time @ Msc_coils_weighted)
+
+        # auto-calculate ip constraint weight if not provided 
+        if lam is None:
+            magnitude_diff = math.floor(math.log10(numpy.mean(numpy.abs(B_weighted)) / (abs(ip_at_time) + 1e-30)))
+            lam = 100 * 10**magnitude_diff
+
+        # each filament contributes equally to Ip, so the row is all-ones for filaments, zeros for wall
+        ip_row_fil  = numpy.ones((1, n_fil))
+        ip_row_norm = numpy.linalg.norm(ip_row_fil)
+        ip_row      = numpy.hstack([numpy.zeros((1, num_Ms)), ip_row_fil / ip_row_norm]) # (1, n_wall + n_fil)
+
+
+        # getting laplacian matrix for smoothing the filament solution in space 
+        lap_mat, N = get_laplace_matrix(rgrid, zgrid, verbose=verbose)                # (n_fil, n_fil)
+
+        # building A matrix's measurements corresponding to sensors: [wall | filament] columns ---
+        meas_block = numpy.hstack([Ms_weighted.T, Msc_fil_weighted.T])                # (n_sensors, n_wall + n_fil)
+
+        # Ip constraint row
+        ip_block = lam * ip_row                                                        # (1, n_wall + n_fil)
+
+        # Tikhonov on wall
+        wall_reg = reg_wall * numpy.hstack([
+            numpy.eye(num_Ms),
+            numpy.zeros((num_Ms, n_fil))
+        ])                                                                             # (n_wall, n_wall + n_fil)
+
+        # Laplacian on filaments
+        fil_lap = lap_lam * numpy.hstack([
+            numpy.zeros((N, num_Ms)),
+            lap_mat
+        ])                                                                             # (n_fil, n_wall + n_fil)
+        # constructing full A matrix by stacking the measurement block with the regularization blocks
+        A = numpy.vstack([meas_block, ip_block, wall_reg, fil_lap])
+
+        # building B matrix by stacking the sensor measurements (with coil contributions removed) with the ip constraint and zeros for regularization rows
+        psi_reg = numpy.concatenate([
+            B_weighted,
+            numpy.array([lam * ip_at_time / ip_row_norm]),
+            numpy.zeros(num_Ms),
+            numpy.zeros(N)
+        ])
+
+        # Solving Ax=B
+        AtA = A.T @ A
+        AtB = A.T @ psi_reg
+        solution = numpy.linalg.solve(AtA, AtB)
+        # extracting wall and filament currents from the solution vector
+        curr_wall = solution[:num_Ms]
+        curr_fil  = solution[num_Ms:]
+
+        # Diagnostics
+        Ax = meas_block @ solution
+        ip_reconstructed  = curr_fil.sum()
+        ip_error_pct      = 100 * numpy.abs(ip_reconstructed - ip_at_time) / (abs(ip_at_time) + 1e-30)
+        fit_residual      = numpy.linalg.norm(Ax - B_weighted)
+        fit_residual_nonorm = Ax - B_weighted
+
+        diagnostics = {
+            'lam':                  lam,
+            'lap_lam':              lap_lam,
+            'reg_wall':             reg_wall,
+            'ip_reconstructed':     ip_reconstructed,
+            'ip_actual':            ip_at_time,
+            'ip_error_pct':         ip_error_pct,
+            'fit_residual':         fit_residual,
+            'fit_residual_nonorm':  fit_residual_nonorm,
+            'solution':             solution,
+        }
+
+        if verbose:
+            print(f"lam = {lam:.3e}, lap_lam = {lap_lam:.3e}, reg_wall = {reg_wall:.3e}")
+            print(f"Ip reconstructed: {ip_reconstructed:.3f} A | Ip actual: {ip_at_time:.3f} A | Error: {ip_error_pct:.2f}%")
+            print(f"Fit residual: {fit_residual:.4e}")
+
+        return curr_fil, curr_wall, Ax, diagnostics
 
     # ======================================
     # Post Processesing and Visualization
@@ -475,7 +587,9 @@ class Jamfit():
         
         # Calculate psi from coils 
         mygs.set_coil_currents(coil_curr_dict)
-        psi_vf = mygs.vac_solve()
+        psi_vf_eq_obj = mygs.vac_solve()
+        psi_vf = psi_vf_eq_obj.get_psi(normalized=False) 
+
 
         # Summate Psis 
         total_psi = psi_total_fil + psi_vf + wall_psi
@@ -494,16 +608,16 @@ class Jamfit():
         q_vals = None
         q95 = None 
         internal_inductance = None
-        current_cent = calc_current_centroid(rgrid, zgrid, ip)
+        current_cent = calc_current_centroid(rgrid, zgrid, filaments_at_time)
         area_cent = None
         area = None
      
         if lcfs_points is not None:
-            lim_R, lim_Z, _ = find_limiting_point(lcfs_points, limiter)
+            lim_R, lim_Z, _ = find_limiting_point(lcfs_points, limiter, touch_tol=0.0005)
             limiting_pts.append((lim_R, lim_Z))
             _, q_vals, _, _, _, _= mygs.get_q() 
             internal_inductance = mygs.get_stats(beta_Ip = ip)['l_i']
-            _, q95, _ , _, _, _ = mygs.get_q(psi_norm=0.95)
+            _, q95, _ , _, _, _ = mygs.get_q(psi=0.95)
             area, area_cent = calc_lcfs_geo(lcfs_points) 
         else: 
             psiatlcfs = None 
@@ -519,7 +633,7 @@ class Jamfit():
     
         return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance, current_cent, area_cent, area
     # ========================================================
-    # Jamfit Depreciated Functions to be worked on or removed 
+    # JAMfit Depreciated Functions to be worked on or removed 
     # ========================================================
 
     def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
@@ -581,7 +695,7 @@ class Jamfit():
         p.show()
 
 # ===============================
-# Jamfit Helper Functions
+# JAMfit Helper Functions
 # ===============================
 
 def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rgrid, zgrid):
@@ -612,7 +726,7 @@ def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rgrid
     coil_curr = numpy.hstack((time_column, coil_curr))
     return coil_curr
 
-
+## AI SLOP TODO EDIT ## 
 def interpolate_total_current(coil_currs, nsteps, verbose=False):
     '''! Interpolate total plasma current to a higher-resolution time grid.
     Sums the sensor currents at each time step and interpolates the total
@@ -648,7 +762,61 @@ def interpolate_total_current(coil_currs, nsteps, verbose=False):
 
     return high_res_time, total_current_high_res
 
-def get_laplace_matrix(rgrid, zgrid, verbose =False):
+
+def get_laplace_matrix(rgrid, zgrid, verbose=False):
+    """
+    FD Laplacian for D-shaped grids.
+    rgrid, zgrid: 1D arrays of valid point coordinates inside the limiter
+    No rectangular grid needed - inferred from unique R,Z values
+    """
+    # Infer the full rectangular grid from unique values
+    nr_arr = numpy.sort(numpy.unique(rgrid))
+    nz_arr = numpy.sort(numpy.unique(zgrid))
+    dr = nr_arr[1] - nr_arr[0] if len(nr_arr) > 1 else 1.0
+    dz = nz_arr[1] - nz_arr[0] if len(nz_arr) > 1 else 1.0
+
+    if verbose:
+        print(f"dr: {dr}, dz: {dz}, nr: {len(nr_arr)}, nz: {len(nz_arr)}")
+        print(f"Valid points: {len(rgrid)} out of {len(nr_arr)*len(nz_arr)} rectangular")
+
+    # Map r,z values to grid indices
+    r_to_idx = {round(r, 8): i for i, r in enumerate(nr_arr)}
+    z_to_idx = {round(z, 8): j for j, z in enumerate(nz_arr)}
+
+    # Build lookup: (ir, iz) -> index in the valid point list
+    N = len(rgrid)
+    valid_set = {}
+    for k in range(N):
+        ir = r_to_idx[round(rgrid[k], 8)]
+        iz = z_to_idx[round(zgrid[k], 8)]
+        valid_set[(ir, iz)] = k
+
+    if verbose:
+        print(f"Built valid_set with {len(valid_set)} points")
+
+    lap_mat = numpy.zeros((N, N))
+
+    for k in range(N):
+        ir = r_to_idx[round(rgrid[k], 8)]
+        iz = z_to_idx[round(zgrid[k], 8)]
+
+        for dir_r, dir_z, weight in [
+            ( 1,  0, 1.0/dr**2),
+            (-1,  0, 1.0/dr**2),
+            ( 0,  1, 1.0/dz**2),
+            ( 0, -1, 1.0/dz**2),
+        ]:
+            neighbor = (ir + dir_r, iz + dir_z)
+            if neighbor in valid_set:
+                # Interior neighbor — standard FD
+                lap_mat[k, valid_set[neighbor]] = weight
+                lap_mat[k, k] -= weight
+            # else: boundary point, Neumann BC, skip
+
+    return lap_mat, N
+
+## SOMETHING MIGHT HAVE BEEN WRONG WITH THIS ## 
+def get_laplace_matrix_old(rgrid, zgrid, verbose =False):
     '''! Construct a Laplacian matrix for the 2D filament grid,
     
     @param rgrid numpy.ndarray, R coordinates of the filament grid
@@ -764,7 +932,7 @@ def calc_current_centroid(R_fil, Z_fil, I):
         @result Z coordinate of the current centroid `[m]`
         @result Net current (algebraic sum) `[A]`
     '''
-    R = numpy.asarray(R_fil)  # Ensure inputs are numpy arrays
+    R = numpy.asarray(R_fil)  # Ensure inumpyuts are numpy arrays
     Z = numpy.asarray(Z_fil)
     I = numpy.asarray(I)
     
