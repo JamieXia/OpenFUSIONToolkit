@@ -13,11 +13,13 @@ import os
 
 import numpy
 import matplotlib.pyplot as plt
+
 import pyvista as pv #depreciated 
+pv.set_jupyter_backend('static')  # Comment to enable interactive plots #depreciated
+
 import math
 from matplotlib.path import Path
 
-pv.set_jupyter_backend('static')  # Comment to enable interactive plots #depreciated
 
 from ._core import ThinCurr, ThinCurr_reduced
 from .._core import OFT_env
@@ -304,11 +306,12 @@ class JAMfit():
         return solution_fil, solution_wall, residual, Ax, B
 
 
-    def prepare_tsvd_laplace(self, sigma, num_non_fil_coils, rgrid, zgrid, nModes, verbose = False):
+    def prepare_tsvd_laplace(self, sigma, num_non_fil_coils, num_sensors, rgrid, zgrid, nModes, verbose = False):
         '''! Prepare matrices and projections for the svd + laplacian reconstruction method.
         
         @param sigma numpy.ndarray, array of standard deviations for each sensor measurement (for weighting)
         @param num_non_fil_coils int, number of non-filament coils in the system
+        @param num_sensors int, number of real sensors in the system
         @param rgrid numpy.ndarray, R coordinates of the filament grid
         @param zgrid numpy.ndarray, Z coordinates of the filament grid
         @param nModes int, number of SVD modes to truncate to
@@ -320,9 +323,9 @@ class JAMfit():
         num_Ms = self.torus_reduced.Ms.shape[0]
 
         # intializing the Ms and Msc matrices with the appropriate weighting and scaling based off sigma
-        Msc_fil_weighted =  self.torus_reduced.Msc[num_non_fil_coils:, :]/sigma[:]
-        Msc_coils_weighted = self.torus_reduced.Msc[:num_non_fil_coils, :]/sigma[:]
-        Ms_weighted = self.torus_reduced.Ms/sigma[:]
+        Msc_fil_weighted =  self.torus_reduced.Msc[num_non_fil_coils:, :num_sensors]/sigma[:]
+        Msc_coils_weighted = self.torus_reduced.Msc[:num_non_fil_coils, :num_sensors]/sigma[:]
+        Ms_weighted = self.torus_reduced.Ms[:, :num_sensors]/sigma[:]
 
         # break the problem into just the filaments and find svd modes (we do not solve for the shaping coil currents during the reconstruction)
         U, S, Vh = numpy.linalg.svd(Msc_fil_weighted, full_matrices=False)
@@ -353,7 +356,7 @@ class JAMfit():
     
 
     
-    def run_reconstruction_tsvd_laplace(self, Psi_at_time, ip_at_time, coil_curr_at_time, Msc_coils, Ms, U_trun, ls_mat, ls_mat_fil, lap_proj, ip_row, N, lam=None, lap_lam=1e-8, reg_wall=1e-5):
+    def run_reconstruction_tsvd_laplace(self, Psi_at_time, ip_at_time, coil_curr_at_time, Msc_coils, Ms, U_trun, ls_mat, ls_mat_fil, lap_proj, ip_row, N, sigma, lam=None, lap_lam=1e-8, reg_wall=1e-5):
         '''! Run the filament current reconstruction with the svd + laplacian method.
         
         @param Psi_at_time numpy.ndarray, sensor flux measurements at time
@@ -367,6 +370,7 @@ class JAMfit():
         @param lap_proj numpy.ndarray, laplacian projection matrix
         @param ip_row numpy.ndarray, ip constraint row, normalized to both sigma and itself
         @param N int, number of filaments
+        @param sigma numpy.ndarray, standard deviations for each sensor (for weighting)
         @param lam float, ip weight (usually calculated automatically but can be set manually)
         @param lap_lam float, laplacian regularization parameter
         @param reg_wall float, wall regularization parameter
@@ -374,7 +378,7 @@ class JAMfit():
         num_Ms = Ms.shape[0]
 
         # taking out coil contributions from the magnetic sensor signals 
-        B = Psi_at_time - coil_curr_at_time @ Msc_coils
+        B = (Psi_at_time - coil_curr_at_time @ Msc_coils)/sigma[:]
 
         if lam is None: 
             # calculating the weight of the ip constraint row based on the magnitudal difference between magnetic sensor signals and the total plasma current
@@ -463,7 +467,7 @@ class JAMfit():
         num_Ms = Ms_weighted.shape[0]
 
         # taking out coil contributions from the magnetic sensor signals 
-        B_weighted = (Psi_at_time - coil_curr_at_time @ Msc_coils_weighted)
+        B_weighted = (Psi_at_time - coil_curr_at_time @ Msc_coils_weighted)/sigma[:]
 
         # auto-calculate ip constraint weight if not provided 
         if lam is None:
@@ -726,7 +730,6 @@ def setup_synthetic_current(timepoints, ip_list, sigma_r, sigma_z, r0, z0, rgrid
     coil_curr = numpy.hstack((time_column, coil_curr))
     return coil_curr
 
-## AI SLOP TODO EDIT ## 
 def interpolate_total_current(coil_currs, nsteps, verbose=False):
     '''! Interpolate total plasma current to a higher-resolution time grid.
     Sums the sensor currents at each time step and interpolates the total
