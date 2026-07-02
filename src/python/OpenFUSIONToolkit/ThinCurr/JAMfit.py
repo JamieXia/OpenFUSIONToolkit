@@ -13,9 +13,6 @@ import os
 import numpy
 import matplotlib.pyplot as plt
 
-import pyvista as pv #depreciated 
-pv.set_jupyter_backend('static')  # Comment to enable interactive plots #depreciated
-
 import math
 from matplotlib.path import Path
 from ._core import ThinCurr, ThinCurr_reduced
@@ -663,67 +660,6 @@ class JAMfit():
                 ax.plot(lcfs_points[:,0], lcfs_points[:,1], 'r--', label='LCFS')
     
         return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance, current_cent, area_cent, area
-    
-    # ========================================================
-    # JAMfit Depreciated Functions to be worked on or removed 
-    # ========================================================
-    def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
-        '''! Visualize sensor positions on the ThinCurr mesh using PyVista.
-        Renders Mirnov probes as oriented arrows and flux loops as spheres
-        overlaid on the wall mesh.
-
-        @param sensor_points_mirnov_array numpy.ndarray, shape (N, 3) array of Mirnov probe positions
-        @param sensor_points_flux dict, dict of flux loop data with keys 'x', 'y', 'z' per loop name
-        @param orientations numpy.ndarray, shape (N, 3) array of normal vectors for each Mirnov probe
-        '''
-        plot_data = self.torus.build_XDMF()
-        grid = plot_data['ThinCurr']['smesh'].get_pyvista_grid()
-
-        p = pv.Plotter()
-        p.camera.up = [0, 0, -100]
-        p.camera_position = [(9, 6, 2), (0, 0, 0), (0, 0, 1)]
-        p.add_mesh(grid, color="white", opacity=0.75, show_edges=False)
-
-        # Mirnov sensor arrows
-        sensor_points_mirnov = pv.PolyData(sensor_points_mirnov_array)
-        sensor_points_mirnov.point_data['vectors'] = orientations
-        arrow = pv.Arrow(tip_length=0.5, tip_radius=0.2, shaft_radius=0.05)
-        arrows = sensor_points_mirnov.glyph(orient='vectors', scale='vectors', factor=0.5, geom=arrow)
-        p.add_mesh(arrows, color='blue', show_scalar_bar=False)
-
-        # Flux loop spheres
-        for name, data in sensor_points_flux.items():
-            positions = numpy.column_stack([data['x'], data['y'], data['z']])
-            flux_polydata = pv.PolyData(positions)
-            spheres_flux = flux_polydata.glyph(geom=pv.Sphere(radius=0.05))
-            p.add_mesh(spheres_flux, color='red')
-
-        p.add_axes(interactive=False)
-        p.show()
-
-    def plot_wall_currents(self, time_index):
-        '''! Visualize wall current vectors on the mesh at a given time index.
-        Renders the current density field J as scaled arrows on the wall mesh,
-        colored by magnitude.
-
-        @param time_index int, index into the simulation time array to plot
-        '''
-        plot_data = self.torus.build_XDMF()
-        plot_times = plot_data['ThinCurr']['smesh'].times
-        grid = plot_data['ThinCurr']['smesh'].get_pyvista_grid()
-        Jfull = plot_data['ThinCurr']['smesh'].get_field('J_v', plot_times[time_index])
-
-        grid["vectors"] = Jfull
-        grid.set_active_vectors("vectors")
-
-        p = pv.Plotter()
-        scale = 1 / (numpy.linalg.norm(Jfull, axis=1)).max()
-        arrows = grid.glyph(scale="vectors", orient="vectors", factor=scale)
-        p.add_mesh(grid, color="white", opacity=0.75, show_edges=True)
-        p.add_mesh(arrows, cmap="turbo", scalar_bar_args={
-            'title': "|J|", "vertical": True, "position_y": 0.25, "position_x": 0.0
-        })
-        p.show()
 
 # ===============================
 # JAMfit Helper Functions
@@ -848,55 +784,6 @@ def get_laplace_matrix(rgrid, zgrid, verbose=False):
 
     return lap_mat, N
 
-## SOMETHING MIGHT HAVE BEEN WRONG WITH THIS ## 
-def get_laplace_matrix_old(rgrid, zgrid, verbose =False):
-    '''! Construct a Laplacian matrix for the 2D filament grid,
-    
-    @param rgrid numpy.ndarray, R coordinates of the filament grid
-    @param zgrid numpy.ndarray, Z coordinates of the filament grid
-    @return lap_mat numpy.ndarray, the constructed Laplacian matrix for the filament grid
-    @ return N int, the number of points in the filament grid
-    '''
-    points = numpy.array(list(zip(rgrid, zgrid)))
-    R_vals = rgrid 
-    Z_vals = zgrid 
-    r_unique = numpy.unique(R_vals)                      
-    z_unique = numpy.unique(Z_vals)
-    dr = numpy.min(numpy.diff(numpy.sort(r_unique)))
-    dz = numpy.min(numpy.diff(numpy.sort(z_unique)))
-    if verbose:
-        print("dr =", dr)
-        print("dz =", dz)
-        print("nr =", len(r_unique))
-        print("nz =", len(z_unique))
-    N = len(points)
-    ## Getting W matrix
-    W = numpy.zeros((N, N))
-    tol = 1e-6  # floating tolerance
-    for i in range(N):
-        Ri, Zi = points[i]
-        for j in range(N):
-            if i == j:
-                continue
-            Rj, Zj = points[j]
-            dR = Ri - Rj
-            dZ = Zi - Zj
-            # Cardinal R-neighbors (same Z, one step in R)
-            if abs(abs(dR) - dr) < tol and abs(dZ) < tol:
-                W[i, j] = (2/3) / dr**2
-            # Cardinal Z-neighbors (same R, one step in Z)
-            elif abs(dR) < tol and abs(abs(dZ) - dz) < tol:
-                W[i, j] = (2/3) / dz**2
-            # Diagonal neighbors (one step in both R and Z)
-            elif abs(abs(dR) - dr) < tol and abs(abs(dZ) - dz) < tol:
-                 W[i, j] = (1/6) / (dr**2 + dz**2)
-    ## Getting D matrix 
-    D = numpy.zeros((N, N))
-    for i in range(N):
-        D[i, i] = numpy.sum(W[i, :])
-    ## Getting Laplacian matrix
-    lap_mat = D - W
-    return lap_mat, N
 
 def find_limiting_point(lcfs_points, limiter, touch_tol=0.005):
     
