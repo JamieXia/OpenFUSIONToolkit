@@ -5,12 +5,11 @@
 #------------------------------------------------------------------------------
 '''! Core definitions for JAMfit - filament reconstruction
 @authors Jamie Xia
-@date June 2026
+@date July 2026
 '''
 
 ## IMPORTING EXTERNAL LIBRARIES ##
 import os
-
 import numpy
 import matplotlib.pyplot as plt
 
@@ -19,8 +18,6 @@ pv.set_jupyter_backend('static')  # Comment to enable interactive plots #depreci
 
 import math
 from matplotlib.path import Path
-
-
 from ._core import ThinCurr, ThinCurr_reduced
 from .._core import OFT_env
 from .sensor import save_sensors
@@ -35,13 +32,9 @@ from ..TokaMaker.meshing import load_gs_mesh
 class JAMfit():
     '''! Main class for JAMfit filament reconstruction.
     Manages setup, synthetic data generation, reduced model creation,
-    and eventual reconstruction of plasma filament currents using the
-    ThinCurr framework.
+    and reconstruction of plasma filament currents using the
+    both ThinCurr and TokaMaker.
     '''
-
-    # =================================
-    # JAMfit Creation Relevant Classes
-    # =================================
 
     def __init__(self, xml_file, thincurr_meshfile, nthreads=None, oft_env=None):
         '''! Initialize the JAMfit object.
@@ -62,6 +55,9 @@ class JAMfit():
         self.thincurr_meshfile = thincurr_meshfile
         self.reduced_created_flag = False
 
+    # =====================================
+    # JAMfit Creation Relevant Classes
+    # =====================================
     def set_xml(self, xml_file):
         '''! Update the XML configuration file path.
 
@@ -72,7 +68,7 @@ class JAMfit():
     def set_sensors(self, sensor_array, floops_path='floops.loc'):
         '''! Save a sensor array to file and return the file path.
 
-        @param sensor_array list, array of sensor objects (e.g. Mirnov, flux loops)
+        @param sensor_array list, array of ThinCurr sensor objects (e.g. Mirnov, flux loops)
         @param floops_path str, output file path for sensor locations (default: 'floops.loc')
         @result str, path to the saved sensor file
         '''
@@ -126,6 +122,11 @@ class JAMfit():
         @param coil_currs numpy.ndarray, combined coil + plasma current array (with time column)
         @param dt float, time step size in seconds
         @param nsteps int, number of time steps
+        @param verbose bool, if True, returns additional plot data (default: False)
+        @param hodlr_path str, path to save/load the HODLR matrices (default: 'full_HOLDR_L.save')
+        @param s_freq int, frequency of sensor data output (default: 10)
+        @param p_freq int, frequency of plotting during the run for plot_data (build_XDMF) (default: 10)
+        @result returns the hist_file and optionally plot_data if verbose is True
         '''
         self.torus.run_td(dt, nsteps, coil_currs=coil_currs, sensor_obj=self.sensor_obj, status_freq= s_freq, plot_freq=p_freq)
         self.torus.plot_td(nsteps, sensor_obj=self.sensor_obj)
@@ -136,7 +137,7 @@ class JAMfit():
         else: 
             return hist_file 
 
-    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False, s_freq = 10, p_freq = 10 ):
+    def create_from_runTD_top_modes(self, num_modes, reduced_filename, coil_currs, dt, nsteps, initial_num_eigs=50, verbose=False, s_freq = 10, p_freq = 10):
         '''! Build a reduced model using the dominant eigenmodes from a full run.
         Computes eigenvalues, runs a preliminary reduced model to identify the
         most active modes by current amplitude, then builds a final reduced model
@@ -149,7 +150,14 @@ class JAMfit():
         @param dt float, time step size in seconds
         @param num_eigs int, number of eigenmodes to compute initially (default: 50)
         @param verbose bool, if True, plots mode amplitudes and prints mode info (default: False)
+        @param s_freq int, frequency of sensor data output (default: 10)
+        @param p_freq int, frequency of plotting during the run for plot_data (build_XDMF) (default: 10)
         @result ThinCurr_reduced, the constructed reduced model object
+        @result numpy.ndarray, sensor measurements from the time-dependent run
+        @result dict, currents from the time-dependent run
+        @result numpy.ndarray, eigenvectors corresponding to the selected dominant modes (if verbose is True)
+        @result list, indices of the selected dominant modes (if verbose is True)
+        @result list, maximum weight amplitudes of the selected dominant modes (if verbose is True)
         '''
         self.eig_vals, self.eig_vecs = self.torus.get_eigs(initial_num_eigs, False)
         torus_first_reduced = self.torus.build_reduced_model(
@@ -180,16 +188,15 @@ class JAMfit():
             else:
                 if verbose:
                     ax.semilogy(currents['time'], abs(currents['curr'][:, i]), color='gray', alpha=0.3)
-        print("eig_inds:", eig_inds)
-        print("eig_vecs shape:", self.eig_vecs.shape)
-        print("eig_vecs[eig_inds] shape:", self.eig_vecs[eig_inds, :].shape)
-        print("first row of selected eig_vecs:", self.eig_vecs[eig_inds[0], :5])  # first 5 elements
-        self.reduced_torus = self.create_reduced_model(self.eig_vecs[eig_inds, :], reduced_filename, compute_B=False)
+                    print("eig_inds:", eig_inds)
+                    print("eig_vecs shape:", self.eig_vecs.shape)
+                    print("eig_vecs[eig_inds] shape:", self.eig_vecs[eig_inds, :].shape)
+        self.torus_reduced = self.create_reduced_model(self.eig_vecs[eig_inds, :], reduced_filename, compute_B=False)
         self.reduced_created_flag = True
         if verbose:
-             return self.reduced_torus, sensors_measurement, currents, self.eig_vecs[eig_inds, :], eig_inds, weight_amplitude
+             return self.torus_reduced, sensors_measurement, currents, self.eig_vecs[eig_inds, :], eig_inds, weight_amplitude
         else:
-            return self.reduced_torus, sensors_measurement, currents
+            return self.torus_reduced, sensors_measurement, currents
     
     
     def create_reduced_model(self, eig_vecs, reduced_filename, compute_B=False):
@@ -200,14 +207,13 @@ class JAMfit():
         @param compute_B bool, if True, computes the B matrix for the reduced model (default: False)
         @result ThinCurr_reduced, the constructed reduced model object
         '''
-        self.reduced_torus = self.torus.build_reduced_model(
+        self.torus_reduced = self.torus.build_reduced_model(
             eig_vecs, filename=reduced_filename, compute_B=compute_B, sensor_obj=self.sensor_obj
         )
         print(f"Reduced model created with {eig_vecs.shape[0]} modes")
         self.reduced_created_flag = True
-        return self.reduced_torus
+        return self.torus_reduced
     
-
     def add_freq_eigenvalues(self, specific_fil_array): 
         '''! Augment the eigenvector basis with frequency-response vectors for specific filaments.
         For each filament index provided, computes the steady-state frequency
@@ -215,7 +221,7 @@ class JAMfit():
         result to the stored eigenvector matrix.
 
         @param specific_fil_array list, indices of filaments to compute frequency responses for
-        @result str, confirmation message on completion
+        @result numpy.ndarray, updated eigenvector matrix including frequency-response vectors, appended to the end of the existing eigenvectors
         '''
         from IPython.display import clear_output
         if self.eig_vecs is None:
@@ -233,9 +239,9 @@ class JAMfit():
         self.eig_vecs = eig_vecs_wfreq
         return eig_vecs_wfreq
 
-    # =================================
-    # Reconstruction Relevant Classes
-    # =================================
+    # ============================================
+    # JAMfit Reconstruction Relevant Classes
+    # ============================================
 
     def initialize_reduced_model(self, reduced_filename):
         '''! Load a previously saved reduced model from file.
@@ -257,14 +263,14 @@ class JAMfit():
         @param sigma numpy.ndarray, array of standard deviations for each sensor measurement (for weighting)
         @param reg_factor_fil float, regularization factor for filament currents
         @param reg_factor_wall float, regularization factor for wall currents
-        @result tuple, containing the solution, residual, Ax, and B
+        @result tuple, containing the filament solution, wall solution, residual, Ax, and B
         '''
         if not self.reduced_created_flag:
             raise ValueError("Reduced model has not been created yet. Please create or initialize a reduced model before running reconstruction.")
         if num_sensors is None: 
             num_sensors = self.torus_reduced.Ms.shape[1] 
         # intializing the Ms and Msc matrices with the appropriate weighting and scaling based off sigma
-        Ms_weighted = self.torus_reduced.Ms[:,:num_sensors]/sigma[:]
+        Ms_weighted = self.torus_reduced.Ms[:, :num_sensors]/sigma[:]
         Msc_weighted = self.torus_reduced.Msc[:, :num_sensors]/sigma[:]
         Msc_weighted_fil = Msc_weighted[num_non_fil_coils:, :]
 
@@ -282,7 +288,7 @@ class JAMfit():
         # here we prepare the the B vector by subtacting the non plasma filament contribution from the sensor measurements
         # we also scale by sigma here as well (to ensure magnetic sensor signals are normalized to each other - one sensor doesnt dominate)
         # finally we append the ip cosntraint row as well 
-        B_weighted = (Psi_at_time - coil_curr_at_time @ self.torus_reduced.Msc[:num_non_fil_coils, :num_sensors]) / sigma[:] 
+        B_weighted = (Psi_at_time/ sigma[:]) - coil_curr_at_time @ self.torus_reduced.Msc[:num_non_fil_coils, :num_sensors] 
         B_weighted = numpy.append(B_weighted, [ip_at_time * ip_weight/ip_row_norm])  # ip_at_time/ip_row_norm reduces to sign(ip_at_time) — magnitude is encoded in A side column
 
         # here we apply tikonov regularization to both the filament and wall component of the lstq 
@@ -374,17 +380,18 @@ class JAMfit():
         @param lam float, ip weight (usually calculated automatically but can be set manually)
         @param lap_lam float, laplacian regularization parameter
         @param reg_wall float, wall regularization parameter
+        @result tuple, containing the filament solution, wall solution, Ax, and diagnostics dictionary
         '''
         num_Ms = Ms.shape[0]
 
         # taking out coil contributions from the magnetic sensor signals 
-        B = (Psi_at_time - coil_curr_at_time @ Msc_coils)/sigma[:]
+        B_weighted = (Psi_at_time)/sigma[:] - coil_curr_at_time @ Msc_coils
 
         if lam is None: 
             # calculating the weight of the ip constraint row based on the magnitudal difference between magnetic sensor signals and the total plasma current
             # ensures that they are on the same order of magnitude for the least squares solution 
             # Compare typical sensor signal magnitude to IP magnitude
-            magnitude_diff = math.floor(math.log10(numpy.mean(numpy.abs(B)) / (abs(ip_at_time) + 1e-30)))
+            magnitude_diff = math.floor(math.log10(numpy.mean(numpy.abs(B_weighted)) / (abs(ip_at_time) + 1e-30)))
             lam = 100 * 10**magnitude_diff # note that I multiply by 100 to give the ip constraint slighly more weight as the magnetic sensor signals have more rows over the singular total plasma current row
         
         ip_scale = numpy.linalg.norm(U_trun.sum(axis=0)) # this is for scaling the ip constraint row to the svd space for the totalip on the B side of Ax=B
@@ -399,7 +406,7 @@ class JAMfit():
 
         # constructing the B vector by stacking the measurement vector with the ip constraint and zeros for the regularization rows
         psi_reg = numpy.concatenate([
-            B,
+            B_weighted,
             numpy.array([lam * ip_at_time / ip_scale]),
             numpy.zeros(num_Ms),
             numpy.zeros(N)
@@ -420,8 +427,8 @@ class JAMfit():
         ip_reconstructed = curr_expand.sum()
         ip_actual        = ip_at_time
         ip_error_pct     = 100 * numpy.abs(ip_reconstructed - ip_actual) / (abs(ip_actual) + 1e-30)
-        fit_residual     = numpy.linalg.norm(Ax - B)
-        fit_residual_nonorm = Ax - B
+        fit_residual     = numpy.linalg.norm(Ax - B_weighted)
+        fit_residual_nonorm = Ax - B_weighted
 
         diagnostics = {
             'lam':              lam,
@@ -439,7 +446,7 @@ class JAMfit():
     
     def run_reconstruction_laplace(self, Psi_at_time, ip_at_time, coil_curr_at_time, sigma, 
                                     num_non_fil_coils, num_real_sensors, rgrid, zgrid, 
-                                    lam=None, lap_lam=1e-6, reg_wall=1e-5, verbose=False):
+                                    lam=None, lap_lam=1e-6, reg_wall=1e-5, sigma_r =1e-1, sigma_z =1e-1, gaussian = False, verbose=False):
         '''! Run filament current reconstruction using direct Laplacian regularization.
         Solves directly in the physical filament space (no SVD projection), applying
         Laplacian smoothing to filaments and Tikhonov regularization to wall currents.
@@ -454,8 +461,11 @@ class JAMfit():
         @param lam float, ip constraint weight (auto-calculated if None)
         @param lap_lam float, Laplacian regularization parameter (default: 1e-6)
         @param reg_wall float, Tikhonov regularization for wall currents (default: 1e-5)
+        @param sigma_r float, standard deviation in the R direction for the Gaussian weighting (optional)
+        @param sigma_z float, standard deviation in the Z direction for the Gaussian weighting (optional)
+        @param gaussian bool, if True uses Gaussian weighting (default: False)
         @param verbose bool, if True prints debug info (default: False)
-        @result tuple of (curr_fil, curr_wall, Ax, diagnostics)
+        @result tuple, containing the filament solution, wall solution, Ax, and diagnostics dictionary
         '''
 
         # intializing the Ms and Msc matrices with the appropriate weighting and scaling based off sigma
@@ -467,19 +477,23 @@ class JAMfit():
         num_Ms = Ms_weighted.shape[0]
 
         # taking out coil contributions from the magnetic sensor signals 
-        B_weighted = (Psi_at_time - coil_curr_at_time @ Msc_coils_weighted)/sigma[:]
+        B_weighted = (Psi_at_time)/sigma[:] - coil_curr_at_time @ Msc_coils_weighted
 
-        # auto-calculate ip constraint weight if not provided 
-        if lam is None:
+        # auto-calculating the weight of the ip constraint row if not provided 
+        if lam is None: 
+            # calculating the weight of the ip constraint row based on the magnitudal difference between magnetic sensor signals and the total plasma current
+            # ensures that they are on the same order of magnitude for the least squares solution 
+            # Compare typical sensor signal magnitude to IP magnitude
             magnitude_diff = math.floor(math.log10(numpy.mean(numpy.abs(B_weighted)) / (abs(ip_at_time) + 1e-30)))
-            lam = 100 * 10**magnitude_diff
+            lam = 100 * 10**magnitude_diff # note that I multiply by 100 to give the ip constraint slighly more weight as the magnetic sensor signals have more rows over the singular total plasma current row
 
         # each filament contributes equally to Ip, so the row is all-ones for filaments, zeros for wall
         ip_row_fil  = numpy.ones((1, n_fil))
         ip_row_norm = numpy.linalg.norm(ip_row_fil)
         ip_row      = numpy.hstack([numpy.zeros((1, num_Ms)), ip_row_fil / ip_row_norm]) # (1, n_wall + n_fil)
 
-
+        if gaussian: 
+            lap_mat, N = get_gaussian_lap_mat(rgrid, zgrid, sigma_r, sigma_z)                # (n_fil, n_fil)
         # getting laplacian matrix for smoothing the filament solution in space 
         lap_mat, N = get_laplace_matrix(rgrid, zgrid, verbose=verbose)                # (n_fil, n_fil)
 
@@ -545,16 +559,22 @@ class JAMfit():
 
         return curr_fil, curr_wall, Ax, diagnostics
 
-    # ======================================
-    # Post Processesing and Visualization
-    # ======================================
+    # =========================================================
+    # JAMfit Reconstruction Post Processesing and Visualization
+    # =========================================================
 
-    def get_wall_psi_tidx(self, num_sensors, solution_wall_tidx): 
-        wall_psi_probes = self.torus_reduced.Ms[:, num_sensors](2*numpy.pi)
-        wall_psi_tidx = solution_wall_tidx @ wall_psi_probes
-        return wall_psi_tidx 
+    def get_wall_psi_tidx(self, num_sensors, solution_wall_at_time): 
+        '''! Compute the wall contribution to the flux at a given time index.
+        Uses the wall current solution and the wall mutual inductance matrix to calculate
+        
+        @param num_sensors int, number of real sensors to filter out 
+        @param solution_wall_at_time numpy.ndarray, wall current potential solution at the given time index
+        @result numpy.ndarray, wall contribution to the flux at the given time index'''
+        wall_psi_probes = self.torus_reduced.Ms[:, num_sensors:]/(2*numpy.pi)
+        wall_psi_at_time = solution_wall_at_time @ wall_psi_probes
+        return wall_psi_at_time 
     
-    def post_process_tidx(self, filaments_at_time, coil_curr_dict, rgrid, zgrid, meshfile_tokamaker, wall_psi, B0, R0, myOFT, verbose = False):
+    def post_process_tidx(self, filaments_at_time, wall_psi, coil_curr_dict, rgrid, zgrid, meshfile_tokamaker, B0, R0, myOFT, verbose = False):
         '''! Post-process the results at a given time index to compute plasma parameters and visualize.
         
         @param filaments_at_time numpy.ndarray, filament currents at the given time index
@@ -566,7 +586,8 @@ class JAMfit():
         @param B0 float, reference magnetic field strength for equilibrium reconstruction
         @param R0 float, reference major radius for equilibrium reconstruction
         @param myOFT OFT_env, the Open FUSION Toolkit environment instance
-        @param verbose bool, if True, plots the equilibrium and LCFS (default: False)'''
+        @param verbose bool, if True, plots the equilibrium and LCFS (default: False)
+        @result tuple, containing LCFS points, limiting points, psi at LCFS, total psi, q values, q95, internal inductance, current centroid, area centroid, and area'''
 
         #intialize tokamaker 
         mygs = TokaMaker(myOFT)
@@ -606,21 +627,27 @@ class JAMfit():
 
         if lcfs_points is None: 
             lcfs_points = mygs.trace_surf(0.99)
-            psiatlcfs = mygs.psinorm_to_absolute(0.99)
+            psiatlcfs = mygs.psinorm_to_absolute(0.99) 
 
         limiting_pts = [] 
-        q_vals = None
-        q95 = None 
-        internal_inductance = None
+        q_vals = None 
+        q95 = numpy.nan 
+        internal_inductance = numpy.nan 
         current_cent = calc_current_centroid(rgrid, zgrid, filaments_at_time)
-        area_cent = None
-        area = None
+        area_cent = numpy.nan 
+        area = numpy.nan 
      
         if lcfs_points is not None:
             lim_R, lim_Z, _ = find_limiting_point(lcfs_points, limiter, touch_tol=0.0005)
-            limiting_pts.append((lim_R, lim_Z))
+            limiting_pts.append([lim_R, lim_Z])
             _, q_vals, _, _, _, _= mygs.get_q() 
-            internal_inductance = mygs.get_stats(beta_Ip = ip)['l_i']
+
+            try:
+                internal_inductance = mygs.get_stats(beta_Ip = ip)['l_i']
+            except ZeroDivisionError:
+                print(f"Couldn't compute li, Ip was {ip}, skipping this one")
+                internal_inductance = numpy.nan
+
             _, q95, _ , _, _, _ = mygs.get_q(psi=0.95)
             area, area_cent = calc_lcfs_geo(lcfs_points) 
         else: 
@@ -636,10 +663,10 @@ class JAMfit():
                 ax.plot(lcfs_points[:,0], lcfs_points[:,1], 'r--', label='LCFS')
     
         return lcfs_points, limiting_pts, psiatlcfs, total_psi, q_vals, q95, internal_inductance, current_cent, area_cent, area
+    
     # ========================================================
     # JAMfit Depreciated Functions to be worked on or removed 
     # ========================================================
-
     def plot_sensors(self, sensor_points_mirnov_array, sensor_points_flux, orientations):
         '''! Visualize sensor positions on the ThinCurr mesh using PyVista.
         Renders Mirnov probes as oriented arrows and flux loops as spheres
@@ -769,8 +796,11 @@ def interpolate_total_current(coil_currs, nsteps, verbose=False):
 def get_laplace_matrix(rgrid, zgrid, verbose=False):
     """
     FD Laplacian for D-shaped grids.
+
+    @param rgrid numpy.ndarray, R coordinates of the filament grid
+    @param zgrid numpy.ndarray, Z coordinates of the filament grid
+    @param verbose bool, if True, prints debug information (default: False)
     rgrid, zgrid: 1D arrays of valid point coordinates inside the limiter
-    No rectangular grid needed - inferred from unique R,Z values
     """
     # Infer the full rectangular grid from unique values
     nr_arr = numpy.sort(numpy.unique(rgrid))
@@ -888,14 +918,8 @@ def calc_lcfs_geo(lcfs_points):
     """
     Calculate area and geometric centroid of the LCFS.
 
-    Parameters:
-        lcfs_points: array-like of shape (2, N)
-                     lcfs_points[0] = R coordinates
-                     lcfs_points[1] = Z coordinates
-    Returns:
-        area     (float): Enclosed area in m²
-        R_c      (float): Centroid R coordinate in m
-        Z_c      (float): Centroid Z coordinate in m
+    @param lcfs_points numpy.ndarray, shape (N, 2), array of LCFS points with columns [R, Z]
+    @result tuple, area enclosed by LCFS, R_c, and Z_c where R_c and Z_c are the coordinates of the geometric centroid of the LCFS.
     """
     if lcfs_points is None:
         return None, None, None
@@ -961,6 +985,13 @@ def calc_current_centroid(R_fil, Z_fil, I):
 
 
 def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False): 
+    ''' ! Get the points of the filament grid that are inside the limiter contour defined in the Tokamaker mesh file. For computing flux contribution from wall
+
+    @param meshfile_tokamaker str, path to the Tokamaker mesh file
+    @param myOFT OFT_env, the Open FUSION Toolkit environment instance
+    @param verbose bool, if True, plots the grid points and limiter contour (default: False)
+    @result tuple, containing the points inside the limiter, a boolean mask of points inside the limiter, and the full grid points
+    '''
     mygs = TokaMaker(myOFT)
     mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(meshfile_tokamaker)
     mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
@@ -986,13 +1017,29 @@ def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False):
         ax.legend()
         plt.colorbar(ax.collections[0], ax=ax, label='Inside Limiter')
         plt.tight_layout()
+        plt.gca().set_aspect('equal', adjustable='box')
         plt.show()
 
     return inside_lim_pts, inside_mask, mygs.r
 
 
-
-
-
-
-
+def get_gaussian_lap_mat(rgrid, zgrid, sigma_r=8e-2, sigma_z=8e-2):
+    '''! Construct a Gaussian-weighted Laplacian regularization matrix for the filament grid (Experimental).
+    Each filament point is connected to its neighbors with weights based on a Gaussian function of the distance
+    @param rgrid numpy.ndarray, R coordinates of the filament grid
+    @param zgrid numpy.ndarray, Z coordinates of the filament grid
+    @param sigma_r float, standard deviation in the R direction for the Gaussian weighting
+    @param sigma_z float, standard deviation in the Z direction for the Gaussian weighting
+    @result lap_mat numpy.ndarray, the constructed Gaussian-weighted Laplacian matrix 
+    '''
+    N = len(rgrid)
+    dr = rgrid[:, None] - rgrid[None, :]  # (N, N)
+    dz = zgrid[:, None] - zgrid[None, :]  # (N, N)
+    
+    W = numpy.exp(-0.5 * ((dr / sigma_r)**2 + (dz / sigma_z)**2))
+    numpy.fill_diagonal(W, 0)  # no self-coupling
+    
+    D = numpy.diag(W.sum(axis=1))
+    lap_mat = D - W
+    
+    return lap_mat, N
