@@ -984,43 +984,53 @@ def calc_current_centroid(R_fil, Z_fil, I):
     return (R_centroid, Z_centroid)
 
 
-def get_inside_limiter_pts(meshfile_tokamaker, myOFT, verbose = False): 
+
+def get_inside_limiter_pts(meshfile_tokamaker, myOFT, stride=1, verbose=False):
     ''' ! Get the points of the filament grid that are inside the limiter contour defined in the Tokamaker mesh file. For computing flux contribution from wall
 
     @param meshfile_tokamaker str, path to the Tokamaker mesh file
     @param myOFT OFT_env, the Open FUSION Toolkit environment instance
+    @param stride int, subsampling stride for the points inside the limiter (default: 1)
     @param verbose bool, if True, plots the grid points and limiter contour (default: False)
     @result tuple, containing the points inside the limiter, a boolean mask of points inside the limiter, and the full grid points
     '''
+        
     mygs = TokaMaker(myOFT)
     mesh_pts, mesh_lc, mesh_reg, coil_dict, cond_dict = load_gs_mesh(meshfile_tokamaker)
     mygs.setup_mesh(mesh_pts, mesh_lc, mesh_reg)
     mygs.setup_regions(cond_dict=cond_dict, coil_dict=coil_dict)
-    mygs.setup(order=2, F0= 1 * 1)
-    r_pts_grid = mygs.r[:,0]
-    z_pts_grid = mygs.r[:,1]
-    r_pts_lim = mygs.lim_contour[:,0]
-    z_pts_lim = mygs.lim_contour[:,1]
+    mygs.setup(order=2, F0=1 * 1)
+
+    r_pts_grid = mygs.r[:, 0]
+    z_pts_grid = mygs.r[:, 1]
+    r_pts_lim = mygs.lim_contour[:, 0]
+    z_pts_lim = mygs.lim_contour[:, 1]
     lim_path = Path(numpy.column_stack([r_pts_lim, z_pts_lim]))
     all_pts = numpy.column_stack([r_pts_grid, z_pts_grid])
-    inside_mask = lim_path.contains_points(all_pts) #boolean grid where 1 means inside limiter and 0 means outside
-    used_pts = numpy.where(inside_mask)[0] #returns indicies of points that are inside limiter
-    inside_lim_pts = numpy.column_stack((mygs.r[used_pts, 0], mygs.r[used_pts, 1])) #grabs pts of the grid that are inside the limiter
+
+    inside_mask = lim_path.contains_points(all_pts)  # full inside-limiter mask
+    inside_idx = numpy.where(inside_mask)[0]
+
+    # subsample the indices that actually get a flux loop
+    sparse_idx = inside_idx[::stride]
+    sparse_mask = numpy.zeros_like(inside_mask)
+    sparse_mask[sparse_idx] = True
+
+    inside_lim_pts = numpy.column_stack((mygs.r[sparse_idx, 0], mygs.r[sparse_idx, 1]))
 
     if verbose:
         fig, ax = plt.subplots()
-        ax.scatter(r_pts_grid, z_pts_grid, c=inside_mask, cmap='RdYlGn', s=10, alpha=0.7)
+        ax.scatter(r_pts_grid, z_pts_grid, c=sparse_mask, cmap='RdYlGn', s=10, alpha=0.7)
         ax.plot(r_pts_lim, z_pts_lim, 'k-', label='Limiter Contour')
-        ax.set_xlabel('R')
-        ax.set_ylabel('Z')
-        ax.set_title('Grid Points Inside Limiter')
+        ax.set_xlabel('R'); ax.set_ylabel('Z')
+        ax.set_title(f'Grid Points With Flux Loops (stride={stride})')
         ax.legend()
-        plt.colorbar(ax.collections[0], ax=ax, label='Inside Limiter')
+        plt.colorbar(ax.collections[0], ax=ax, label='Has flux loop')
         plt.tight_layout()
         plt.gca().set_aspect('equal', adjustable='box')
         plt.show()
 
-    return inside_lim_pts, inside_mask, mygs.r
+    return inside_lim_pts, sparse_mask, inside_mask, mygs.r
 
 
 def get_gaussian_lap_mat(rgrid, zgrid, sigma_r=8e-2, sigma_z=8e-2):
